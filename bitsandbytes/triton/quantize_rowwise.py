@@ -3,9 +3,9 @@ import math
 import torch
 
 from bitsandbytes.triton.triton_utils import is_triton_available
-from .triton_utils import assert_same_device
-
 from triton.language.extra import libdevice
+
+from .triton_utils import assert_same_device
 
 if not is_triton_available():
 

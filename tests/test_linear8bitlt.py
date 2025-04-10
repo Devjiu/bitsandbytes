@@ -4,7 +4,6 @@ import os
 import pickle
 from tempfile import TemporaryDirectory
 
-from bitsandbytes.nn.triton_based_modules import SwitchBackLinear
 import pytest
 import torch
 
@@ -13,6 +12,7 @@ from bitsandbytes import functional as F
 from bitsandbytes.autograd import get_inverse_transform_indices, undo_layout
 from bitsandbytes.cextension import HIP_ENVIRONMENT
 from bitsandbytes.nn.modules import Linear8bitLt
+from bitsandbytes.nn.triton_based_modules import SwitchBackLinear
 from tests.helpers import (
     TRUE_FALSE,
     id_formatter,
@@ -56,13 +56,17 @@ def test_linear_no_igemmlt(device):
         vector_wise_quantization=False,
     )
 
-    linear_custom = Linear8bitLt(
-        linear.in_features,
-        linear.out_features,
-        linear.bias is not None,
-        has_fp16_weights=False,
-        threshold=6.0,
-    ).to(device).half()
+    linear_custom = (
+        Linear8bitLt(
+            linear.in_features,
+            linear.out_features,
+            linear.bias is not None,
+            has_fp16_weights=False,
+            threshold=6.0,
+        )
+        .to(device)
+        .half()
+    )
 
     linear_custom.state.force_no_igemmlt = True
 
@@ -80,12 +84,12 @@ def test_linear_no_igemmlt(device):
     linear_custom.bias = linear.bias
     linear_custom = linear_custom.to(device)
     linear = linear.to(device)
- 
+
     x = torch.randn(batch, dim, dtype=torch.half).to(device)
     x1 = torch.randn(batch, dim).to(device).half().requires_grad_(True)
     x2 = x1.clone().detach().requires_grad_(True)
     x3 = x1.clone().detach().requires_grad_(True)
-   # linear = linear.half().to(device)
+    # linear = linear.half().to(device)
 
     x_ref = x.clone().to(device).requires_grad_(True)
     x_ours = x.clone().to(device).requires_grad_(True)
@@ -100,6 +104,7 @@ def test_linear_no_igemmlt(device):
     # assert not linear_custom.state.has_fp16_weights
 
     import pdb
+
     pdb.set_trace()
     idx = torch.isclose(fx_ref, fx_ours, rtol=0.02, atol=1e-5)
     assert (idx == 0).sum().item() < fx_ref.numel() * 2.5e-4

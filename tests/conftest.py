@@ -1,11 +1,11 @@
 import gc
+
 import pytest
 import torch
 
-
 _available_devices = []
 if torch.cuda.is_available():
-    _available_devices.append("cuda") # Covers both NVIDIA CUDA and AMD ROCm via torch.cuda
+    _available_devices.append("cuda")  # Covers both NVIDIA CUDA and AMD ROCm via torch.cuda
 if hasattr(torch, "xpu") and torch.xpu.is_available():
     _available_devices.append("xpu")
 
@@ -21,6 +21,7 @@ def pytest_addoption(parser):
         choices=_available_devices,
     )
 
+
 @pytest.fixture(scope="session")
 def device(request):
     """Yields the device string selected via --device."""
@@ -28,13 +29,12 @@ def device(request):
     return device_str
 
 
-
 def pytest_runtest_call(item):
     try:
         item.runtest()
     except RuntimeError as re:
         if "Found no NVIDIA driver" in str(re) and "cuda" in item.config.getoption("--device"):
-             pytest.skip("No NVIDIA driver found for selected CUDA device")
+            pytest.skip("No NVIDIA driver found for selected CUDA device")
         raise
 
 
@@ -49,21 +49,21 @@ def pytest_runtest_teardown(item, nextitem):
 
 @pytest.fixture
 def requires_gpu(device, scope="session"):
-    if device == 'cuda' and not torch.cuda.is_available():
+    if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("Test requires CUDA device")
-    if device == 'xpu' and not torch.xpu.is_available():
+    if device == "xpu" and not torch.xpu.is_available():
         pytest.skip("Test requires XPU device")
-    
+
     return True
 
 
 @pytest.fixture
 def requires_cuda(target_device):
-     if target_device.type != 'cuda':
+    if target_device.type != "cuda":
         pytest.skip("Test requires CUDA device")
 
 
 @pytest.fixture
 def requires_xpu(target_device):
-    if target_device.type != 'xpu':
+    if target_device.type != "xpu":
         pytest.skip("Test requires XPU device")

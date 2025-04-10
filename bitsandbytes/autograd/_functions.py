@@ -548,7 +548,7 @@ def matmul(
     state = state or MatmulLtState()
     if threshold > 0.0:
         state.threshold = threshold
-        
+
     # TODO manual switch
     if A.device.type in ("cpu", "xpu") and state.is_training and False:
         return MatMul8bitFp.apply(A, B, out, bias, state)

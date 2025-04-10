@@ -10,8 +10,6 @@ else:
     import triton
     import triton.language as tl
 
-    from .matmul_perf_model import early_config_prune, estimate_matmul_time
-
     # This is a matmul kernel based on triton.ops.matmul
     # It is modified to support rowwise quantized input and global quantized weight
     # It's purpose is fused matmul then dequantize

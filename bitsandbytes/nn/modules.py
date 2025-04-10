@@ -680,7 +680,6 @@ class Int8Params(torch.nn.Parameter):
             self.SCB = SCB
         return self
 
-
     @overload
     def to(
         self: T,

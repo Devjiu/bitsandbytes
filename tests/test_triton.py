@@ -7,8 +7,8 @@ from bitsandbytes.nn.triton_based_modules import SwitchBackLinear
 from bitsandbytes.triton.triton_utils import is_triton_available
 from tests.helpers import TRUE_FALSE
 
-
 device = "xpu"
+
 
 @pytest.mark.skipif(HIP_ENVIRONMENT, reason="this test is not supported on ROCm yet")
 @pytest.mark.skipif(

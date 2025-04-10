@@ -78,7 +78,7 @@ def estimate_matmul_time(
     """return estimated running time in ms
     = max(compute, loading) + store"""
     # device = torch.cuda.current_device()
-    device = 'xpu'
+    device = "xpu"
     dtype = A.dtype
     dtsize = A.element_size()
 
@@ -154,7 +154,7 @@ def early_config_prune(configs, named_args, **kwargs):
             config.num_stages,
         )
 
-        max_shared_memory = 9 * 1e9# driver.active.utils.get_device_properties(device)["max_shared_mem"]
+        max_shared_memory = 9 * 1e9  # driver.active.utils.get_device_properties(device)["max_shared_mem"]
         required_shared_memory = (BLOCK_M + BLOCK_N) * BLOCK_K * num_stages * dtsize
         if required_shared_memory <= max_shared_memory:
             pruned_configs.append(config)

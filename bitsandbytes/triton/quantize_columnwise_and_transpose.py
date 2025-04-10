@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from bitsandbytes.triton.triton_utils import is_triton_available, assert_same_device
+from bitsandbytes.triton.triton_utils import assert_same_device, is_triton_available
 from triton.language.extra import libdevice
 
 if not is_triton_available():
