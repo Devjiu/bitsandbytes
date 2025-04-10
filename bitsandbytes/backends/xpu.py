@@ -15,7 +15,7 @@ from .cpu_xpu_common import (
     int8_mm_dequant_impl,
     quantize_4bit_impl,
 )
-from bitsandbytes import functional.pad as BBpad
+from bitsandbytes.functional import pad as BBpad
 
 Tensor = torch.Tensor
 
