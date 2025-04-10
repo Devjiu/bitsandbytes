@@ -2,10 +2,9 @@ from typing import Literal, Optional, Tuple
 
 import torch
 
+from bitsandbytes.utils import QuantState
 import triton
 import triton.language as tl
-
-from bitsandbytes.utils import QuantState
 
 from .base import Backend
 from .cpu_xpu_common import (
@@ -18,6 +17,7 @@ from .cpu_xpu_common import (
 )
 
 Tensor = torch.Tensor
+
 
 @triton.jit
 def dequant_kernel(
@@ -60,6 +60,7 @@ def dequant_kernel(
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
 
+
 def dequant_8bit(A, offset, quant_state):
     assert A.dtype == torch.uint8
     absmax = quant_state.code[A.reshape(-1).int()]
@@ -73,8 +74,14 @@ def dequant_8bit(A, offset, quant_state):
     absmax += offset
     return absmax
 
+
 def dequant_nf4_fp16(
-    A_nf4: torch.Tensor, quant_state: Optional[QuantState] = None, absmax: Optional[torch.Tensor] = None, out: Optional[torch.Tensor] = None, quant_blocksize: int = 64, quant_type: Literal["fp4", "nf4"] = "fp4"
+    A_nf4: torch.Tensor,
+    quant_state: Optional[QuantState] = None,
+    absmax: Optional[torch.Tensor] = None,
+    out: Optional[torch.Tensor] = None,
+    quant_blocksize: int = 64,
+    quant_type: Literal["fp4", "nf4"] = "fp4",
 ):
     transpose = True if A_nf4.shape[0] == 1 else False
     DEVICE = triton.runtime.driver.active.get_active_torch_device()
@@ -98,7 +105,7 @@ def dequant_nf4_fp16(
         )
     else:
         absmax = quant_state.absmax
-    
+
     quant_state_code = quant_state.code.to(device=DEVICE)
 
     if quant_type not in ["nf4"]:
@@ -115,7 +122,6 @@ def dequant_nf4_fp16(
 
     if out is None:
         out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A_nf4.device)
-    
 
     # It's will be processed as an array, so
     # actual length is row * col
@@ -274,7 +280,7 @@ class XPUBackend(Backend):
         if blocksize is None:
             blocksize = 64
         assert_on_xpu([A, absmax, out])
-        if quant_type == "nf4": 
+        if quant_type == "nf4":
             output = dequant_nf4_fp16(A, quant_state, absmax, out, blocksize, quant_type)
             return output
 
