@@ -2,6 +2,7 @@ from typing import Literal, Optional, Tuple
 
 import torch
 
+from bitsandbytes.functional import pad as BBpad
 from bitsandbytes.utils import QuantState
 import triton
 import triton.language as tl
@@ -15,7 +16,6 @@ from .cpu_xpu_common import (
     int8_mm_dequant_impl,
     quantize_4bit_impl,
 )
-from bitsandbytes.functional import pad as BBpad
 
 Tensor = torch.Tensor
 
