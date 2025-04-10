@@ -427,12 +427,15 @@ def dequant_8bit(A, offset, quant_state):
     absmax += offset
     return absmax
 
+
 import triton
 import triton.language as tl
 
+
 @triton.jit
-def dequant_kernel(a_ptr, c_ptr, quant_ptr, absmax_ptr, num_paired_elements,
-                   QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr):
+def dequant_kernel(
+    a_ptr, c_ptr, quant_ptr, absmax_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr
+):
     PAIRED_QUANT_BLOCK = QUANT_BLOCK // 2
 
     pid = tl.program_id(axis=0)  # We use a 1D launch grid so axis is 0.
@@ -444,7 +447,7 @@ def dequant_kernel(a_ptr, c_ptr, quant_ptr, absmax_ptr, num_paired_elements,
     a = a.to(tl.uint8, bitcast=True)
 
     # higher 4bits from uint8 packed tensor
-    higher = (a & 0xf)
+    higher = a & 0xF
     # lower 4bits
     lower = a >> 4
 
@@ -471,9 +474,9 @@ def dequant_kernel(a_ptr, c_ptr, quant_ptr, absmax_ptr, num_paired_elements,
     tl.store(c_ptr + offs, out_dq, mask)
 
 
-def dequant_nf4_fp16(A_nf4: torch.Tensor, out_B: torch.Tensor,
-                     quant_state_code: torch.Tensor, absmax: torch.Tensor,
-                     quant_blocksize):
+def dequant_nf4_fp16(
+    A_nf4: torch.Tensor, out_B: torch.Tensor, quant_state_code: torch.Tensor, absmax: torch.Tensor, quant_blocksize
+):
     DEVICE = triton.runtime.driver.active.get_active_torch_device()
     A_nf4 = A_nf4.to(device=DEVICE)
     out_B = out_B.to(device=DEVICE)
@@ -482,8 +485,7 @@ def dequant_nf4_fp16(A_nf4: torch.Tensor, out_B: torch.Tensor,
     if A_nf4.dtype != torch.uint8:
         print("[Warning] Forcing conversion of {A_nf4.dtype} to uint8.")
         bytes_value = A_nf4.cpu().numpy().tobytes()
-        A_nf4 = torch.frombuffer(bytes_value,
-                                 dtype=torch.uint8).to(A_nf4.device)
+        A_nf4 = torch.frombuffer(bytes_value, dtype=torch.uint8).to(A_nf4.device)
 
     # print("-----------\n")
     # print("inp shape: ", A_nf4.shape)
@@ -497,16 +499,16 @@ def dequant_nf4_fp16(A_nf4: torch.Tensor, out_B: torch.Tensor,
     split_size = 2048
     # output written will be split_size * 2
 
-    grid = (number_of_paired_elements // split_size + 1, )
+    grid = (number_of_paired_elements // split_size + 1,)
     # print("grid: ", grid)
     # print(" shapes: ", A_nf4.shape, out_B.shape, quant_state_code.shape,
     #       absmax.shape)
     # print(" grid: ", grid)
     # print("absmax: ", absmax)
     # print("-----------\n")
-    dequant_kernel[grid](A_nf4, out_B, quant_state_code, absmax,
-                         number_of_paired_elements, quant_blocksize,
-                         split_size)
+    dequant_kernel[grid](
+        A_nf4, out_B, quant_state_code, absmax, number_of_paired_elements, quant_blocksize, split_size
+    )
     return out_B
 
 
@@ -572,9 +574,9 @@ def dequantize_4bit_impl(
 
     if quant_state.nested:
         absmax = dequant_8bit(absmax, quant_state.offset, quant_state.state2)
-    
+
     if out is None:
-            out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A.device)
+        out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A.device)
     out = dequant_nf4_fp16(A, out, quant_state.code, absmax, quant_state.blocksize)
     if transpose:
         out = out.t()

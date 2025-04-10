@@ -27,6 +27,7 @@ k = 20
 SKIP_4BIT_TESTS = True
 SKIP_NONMUTLI_BACKEND = True
 
+
 def assert_all_approx_close(a, b, rtol=1e-3, atol=1e-3, count=0, throw=True):
     idx = torch.isclose(a, b, rtol=rtol, atol=atol)
     sumval = (idx == 0).sum().item()
@@ -98,7 +99,6 @@ def setup():
 
 def teardown():
     pass
-
 
 
 @pytest.mark.skipif(SKIP_NONMUTLI_BACKEND, reason="Not part of multi-backend functionality")
@@ -444,7 +444,7 @@ def test_ibmm(dim1, dim2, dim3, dim4, transpose, device):
 @pytest.mark.parametrize("dim4", [512], ids=id_formatter("dim4"))
 @pytest.mark.parametrize("dims", (2, 3), ids=id_formatter("dims"))
 @pytest.mark.parametrize("ldb", (0,), ids=id_formatter("ldb"))
-@pytest.mark.parametrize("compute_device", ('gpu', 'cpu'), ids=id_formatter("compute_device"))
+@pytest.mark.parametrize("compute_device", ("gpu", "cpu"), ids=id_formatter("compute_device"))
 def test_int8_linear_matmul(dim1, dim2, dim3, dim4, dims, ldb, device, compute_device):
     if compute_device == "cpu":
         device = "cpu"
@@ -462,7 +462,6 @@ def test_int8_linear_matmul(dim1, dim2, dim3, dim4, dims, ldb, device, compute_d
 
         C2 = F.int8_linear_matmul(A, B)
         torch.testing.assert_close(C1, C2.float())
-
 
 
 @pytest.mark.parametrize("dim1", [32], ids=id_formatter("dim1"))
@@ -788,7 +787,7 @@ def test_transform(dim1, dim2, dim3, dims, dtype, orderA, orderOut, transpose, d
         torch.testing.assert_close(out1, out2)
 
 
-# @pytest.mark.skipif(MUTLI_BACKEND, reason="Not part of multi-backend functionality")
+# @pytest.mark.skipif(MULTI_BACKEND, reason="Not part of multi-backend functionality")
 @pytest.mark.parametrize("dim1", get_test_dims(2, 1024, n=2), ids=id_formatter("dim1"))
 @pytest.mark.parametrize("dim2", get_test_dims(2, 1024, n=2), ids=id_formatter("dim2"))
 @pytest.mark.parametrize("dim3", [0], ids=id_formatter("dim3"))
@@ -956,7 +955,7 @@ def test_integrated_sparse_decomp(dim1, dim2, device):
         assert err2 < err1
 
 
-# @pytest.mark.skipif(MUTLI_BACKEND, reason="Not part of multi-backend functionality")
+# @pytest.mark.skipif(MULTI_BACKEND, reason="Not part of multi-backend functionality")
 def test_matmuls(device):
     a = torch.randn(256, 512).half().to(device)
     b = torch.randn(256, 512).half().to(device)
@@ -1313,6 +1312,7 @@ def test_blockwise_cpu_large():
             # print(sum(diffs)/len(diffs))
             # print(sum(reldiffs)/len(reldiffs))
 
+
 @pytest.mark.skipif(SKIP_NONMUTLI_BACKEND, reason="Not part of multi-backend functionality")
 def test_fp8_quant():
     for e_bits in range(1, 7):
@@ -1662,7 +1662,8 @@ def test_gemv_4bit(dtype, storage_type, quant_storage, double_quant, kind):
                 B = torch.randn(dim * 3, dim, dtype=dtype, device=device) / math.sqrt(dim)
 
             qB, state = F.quantize_4bit(
-                B, 'cpu',
+                B,
+                "cpu",
                 quant_type=storage_type,
                 compress_statistics=double_quant,
                 quant_storage=quant_storage,
