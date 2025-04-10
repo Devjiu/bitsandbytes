@@ -2,7 +2,7 @@ from typing import Literal, Optional, Tuple
 
 import torch
 
-from bitsandbytes.functional import pad as BBpad
+from bitsandbytes import functional as F
 from bitsandbytes.utils import QuantState
 import triton
 import triton.language as tl
@@ -19,7 +19,20 @@ from .cpu_xpu_common import (
 
 Tensor = torch.Tensor
 
-
+# @triton.autotune(
+#     configs=[
+#         # triton.Config({'SPLIT_SIZE': 64}), 
+#         # triton.Config({'SPLIT_SIZE': 128}), 
+#         # triton.Config({'SPLIT_SIZE': 256}), 
+#         triton.Config({'SPLIT_SIZE': 512}), 
+#         # triton.Config({'SPLIT_SIZE': 1024}), 
+#         # triton.Config({'SPLIT_SIZE': 2048}), 
+#         # triton.Config({'SPLIT_SIZE': 4096}), 
+#         # triton.Config({'SPLIT_SIZE': 8192}), 
+#         # triton.Config({'SPLIT_SIZE': 16384}), 
+#     ],
+#     key=['SPLIT_SIZE'],
+# )
 @triton.jit
 def dequant_kernel(
     a_ptr, c_ptr, quant_ptr, absmax_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr
@@ -68,7 +81,7 @@ def dequant_8bit(A, offset, quant_state):
     blocks = absmax.shape[-1] // 256
     res = absmax.shape[-1] % 256
     if res != 0:
-        absmax = BBpad(absmax, (0, 256 - res), mode="constant", value=0)
+        absmax = F.pad(absmax, (0, 256 - res), mode="constant", value=0)
     absmax = (absmax.view(-1, 256) * quant_state.absmax.view(-1, 1)).to(quant_state.dtype).reshape(-1)
     absmax = absmax[: blocks * 256 + res]
     absmax = absmax.reshape(A.shape)
@@ -130,12 +143,14 @@ def dequant_nf4_fp16(
     # so total amount of data is 2 * elem_count
     number_of_paired_elements = A_nf4.numel()
     # we assume that split_size > quant_blocksize
-    split_size = 2048
 
-    grid = (number_of_paired_elements // split_size + 1,)
+    SPLIT_SIZE = 512
+    # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
+    grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
+    # print("split: ", split_size, " grid: ", grid)
     # start = time.time()
     dequant_kernel[grid](
-        A_nf4, out, quant_state_code, absmax, number_of_paired_elements, quant_state.blocksize, split_size
+        A_nf4, out, quant_state_code, absmax, number_of_paired_elements, quant_state.blocksize, SPLIT_SIZE
     )
     # print("dequant_kernel: ", (time.time() - start), "s")
 
