@@ -339,7 +339,7 @@ def test_dim3_igemm(seq_dim, hidden_dim, batch_dim, device):
 @pytest.mark.parametrize("hidden_dim", get_test_dims(32, 1024 * 4, n=2), ids=id_formatter("hidden_dim"))
 @pytest.mark.parametrize("batch_dim", get_test_dims(2, 16, n=2), ids=id_formatter("batch_dim"))
 @pytest.mark.parametrize("transpose", TRUE_FALSE, ids=id_formatter("transpose"))
-def test_minmax_igemm(seq_dim, hidden_dim, batch_dim, transpose):
+def test_minmax_igemm(seq_dim, hidden_dim, batch_dim, transpose, device):
     def min_max(x):
         maxA = torch.amax(x, dim=2, keepdim=True)
         minA = torch.amin(x, dim=2, keepdim=True)
@@ -1314,7 +1314,7 @@ def test_blockwise_cpu_large():
 
 
 @pytest.mark.skipif(SKIP_NONMUTLI_BACKEND, reason="Not part of multi-backend functionality")
-def test_fp8_quant():
+def test_fp8_quant(device):
     for e_bits in range(1, 7):
         p_bits = 7 - e_bits
         code = F.create_fp8_map(True, e_bits, p_bits).to(device)
@@ -1363,7 +1363,7 @@ def test_fp8_quant():
 
 
 @pytest.mark.skipif(SKIP_NONMUTLI_BACKEND, reason="Not part of multi-backend functionality")
-def test_few_bit_quant():
+def test_few_bit_quant(device):
     # print('')
     for bits in range(2, 9):
         # print('='*30, bits, '='*30)
@@ -1422,7 +1422,7 @@ def test_few_bit_quant():
 
 
 @pytest.mark.skipif(SKIP_NONMUTLI_BACKEND, reason="Not part of multi-backend functionality")
-def test_kbit_quantile_estimation():
+def test_kbit_quantile_estimation(device):
     for i in range(100):
         data = torch.randn(1024, 1024, device=device)
         for bits in range(2, 9):
@@ -1449,7 +1449,7 @@ def test_kbit_quantile_estimation():
 
 @pytest.mark.skipif(SKIP_NONMUTLI_BACKEND, reason="Not part of multi-backend functionality")
 @pytest.mark.benchmark
-def test_bench_dequantization():
+def test_bench_dequantization(device):
     a = torch.rand(1024, 1024, device=device).half()
     code = F.create_fp8_map(True, 3, 0, 4).to(device)
     qa, SA = F.quantize_blockwise(a, code=code)
@@ -1838,7 +1838,7 @@ def test_managed():
     HIP_ENVIRONMENT and ROCM_GPU_ARCH == "gfx90a",
     reason="this test is not supported on ROCm with gfx90a architecture yet",
 )
-def test_gemv_eye_4bit(storage_type, dtype, double_quant):
+def test_gemv_eye_4bit(storage_type, dtype, double_quant, device):
     dims = 10
     torch.random.manual_seed(np.random.randint(0, 412424242))
     dims = get_test_dims(0, 8192, n=dims)
@@ -1966,7 +1966,7 @@ def test_percentile_clipping(gtype, device):
 @pytest.mark.parametrize("transpose", [False], ids=id_formatter("transpose"))
 @pytest.mark.parametrize("dims", [2, 3], ids=id_formatter("dims"))
 @pytest.mark.deprecated
-def test_nvidia_transform(dim1, dim2, dim3, dims, dtype, orderA, orderOut, transpose):
+def test_nvidia_transform(dim1, dim2, dim3, dims, dtype, orderA, orderOut, transpose, device):
     if dims == 3 and orderOut != "col32":
         return
     if dtype == torch.int32 and orderOut != "col32":

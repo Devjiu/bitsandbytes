@@ -15,6 +15,7 @@ from .cpu_xpu_common import (
     int8_mm_dequant_impl,
     quantize_4bit_impl,
 )
+from bitsandbytes import functional.pad as BBpad
 
 Tensor = torch.Tensor
 
@@ -67,7 +68,7 @@ def dequant_8bit(A, offset, quant_state):
     blocks = absmax.shape[-1] // 256
     res = absmax.shape[-1] % 256
     if res != 0:
-        absmax = F.pad(absmax, (0, 256 - res), mode="constant", value=0)
+        absmax = BBpad(absmax, (0, 256 - res), mode="constant", value=0)
     absmax = (absmax.view(-1, 256) * quant_state.absmax.view(-1, 1)).to(quant_state.dtype).reshape(-1)
     absmax = absmax[: blocks * 256 + res]
     absmax = absmax.reshape(A.shape)
@@ -100,7 +101,7 @@ def dequant_nf4_fp16(
             absmax=absmax,
             shape=out.shape,
             dtype=out.dtype,
-            blocksize=blocksize,
+            blocksize=quant_blocksize,
             quant_type=quant_type,
         )
     else:

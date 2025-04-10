@@ -1,13 +1,14 @@
 import torch
 
+import triton
+import triton.language as tl
+
 from bitsandbytes import functional as F
 
 k = 20
 
 torch.set_printoptions(precision=5, sci_mode=False, linewidth=120, edgeitems=20, threshold=10000)
 
-import triton
-import triton.language as tl
 
 
 @triton.jit
