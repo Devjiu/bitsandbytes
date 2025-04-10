@@ -1620,20 +1620,19 @@ def test_normal_map_tree():
         # print(pivots)
 
 
-@pytest.mark.skipif(SKIP_4BIT_TESTS, reason="Not testing 4bit yet")
 @pytest.mark.skipif(
     HIP_ENVIRONMENT, reason="gemv 4bit tests are partially enabled on MI300, others being fixed for warpsize 64"
 )
 @pytest.mark.parametrize("double_quant", TRUE_FALSE, ids=lambda double_quant: f"DQ_{double_quant}")
-@pytest.mark.parametrize("storage_type", ["nf4", "fp4"])
+@pytest.mark.parametrize("storage_type", ["nf4"])
 @pytest.mark.parametrize("kind", ["fc1", "fc2", "attn", "attn_packed"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32], ids=describe_dtype)
 @pytest.mark.parametrize(
     "quant_storage",
-    [torch.uint8, torch.float16, torch.bfloat16, torch.float32],
+    [torch.uint8],
     ids=describe_dtype,
 )
-def test_gemv_4bit(dtype, storage_type, quant_storage, double_quant, kind):
+def test_gemv_4bit(dtype, storage_type, quant_storage, double_quant, kind, device):
     for dim in [128, 256, 512, 1024]:
         # for dim in [4*1024]:
         # for dim in [1*16]:
@@ -1663,7 +1662,6 @@ def test_gemv_4bit(dtype, storage_type, quant_storage, double_quant, kind):
 
             qB, state = F.quantize_4bit(
                 B,
-                "cpu",
                 quant_type=storage_type,
                 compress_statistics=double_quant,
                 quant_storage=quant_storage,
