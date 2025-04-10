@@ -19,17 +19,18 @@ from .cpu_xpu_common import (
 
 Tensor = torch.Tensor
 
+
 # @triton.autotune(
 #     configs=[
-#         # triton.Config({'SPLIT_SIZE': 64}), 
-#         # triton.Config({'SPLIT_SIZE': 128}), 
-#         # triton.Config({'SPLIT_SIZE': 256}), 
-#         triton.Config({'SPLIT_SIZE': 512}), 
-#         # triton.Config({'SPLIT_SIZE': 1024}), 
-#         # triton.Config({'SPLIT_SIZE': 2048}), 
-#         # triton.Config({'SPLIT_SIZE': 4096}), 
-#         # triton.Config({'SPLIT_SIZE': 8192}), 
-#         # triton.Config({'SPLIT_SIZE': 16384}), 
+#         # triton.Config({'SPLIT_SIZE': 64}),
+#         # triton.Config({'SPLIT_SIZE': 128}),
+#         # triton.Config({'SPLIT_SIZE': 256}),
+#         triton.Config({'SPLIT_SIZE': 512}),
+#         # triton.Config({'SPLIT_SIZE': 1024}),
+#         # triton.Config({'SPLIT_SIZE': 2048}),
+#         # triton.Config({'SPLIT_SIZE': 4096}),
+#         # triton.Config({'SPLIT_SIZE': 8192}),
+#         # triton.Config({'SPLIT_SIZE': 16384}),
 #     ],
 #     key=['SPLIT_SIZE'],
 # )
