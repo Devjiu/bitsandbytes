@@ -26,6 +26,7 @@ cmake-build-*/
 
 # IDE local files
 .vs/
+.vscode/
 .idea/
 
 # Distribution / packaging
