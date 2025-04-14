@@ -75,7 +75,20 @@ def dequant_4bit_kernel(
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
 
-
+@triton.autotune(
+    configs=[
+        triton.Config({'SPLIT_SIZE': 64}),
+        triton.Config({'SPLIT_SIZE': 128}),
+        triton.Config({'SPLIT_SIZE': 256}),
+        triton.Config({'SPLIT_SIZE': 512}),
+        triton.Config({'SPLIT_SIZE': 1024}),
+        triton.Config({'SPLIT_SIZE': 2048}),
+        triton.Config({'SPLIT_SIZE': 4096}),
+        triton.Config({'SPLIT_SIZE': 8192}),
+        triton.Config({'SPLIT_SIZE': 16384}),
+    ],
+    key=['SPLIT_SIZE'],
+)
 @triton.jit
 def dequant_8bit_kernel(
     a_ptr,
@@ -140,13 +153,13 @@ def dequant_int8_fp16(
     number_of_paired_elements = A_nf4.numel()
     # we assume that split_size > quant_blocksize
 
-    SPLIT_SIZE = 512
-    # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
-    grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
+    # SPLIT_SIZE = 512
+    grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]), )
+    # grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
     # print("split: ", split_size, " grid: ", grid)
     # start = time.time()
     dequant_8bit_kernel[grid](
-        A_nf4, out, quant_state_code, absmax, bias, number_of_paired_elements, quant_blocksize, SPLIT_SIZE
+        A_nf4, out, quant_state_code, absmax, bias, number_of_paired_elements, quant_blocksize
     )
     # print("out: ", out)
     return out
@@ -154,22 +167,18 @@ def dequant_int8_fp16(
 
 def dequant_8bit(A, offset, quant_state):
     assert A.dtype == torch.uint8
-    print("[ref] absmax A: ", A)
-    print("[ref] bias: ", offset)
+    # print("[ref] absmax A: ", A)
+    # print("[ref] bias: ", offset)
     absmax = quant_state.code[A.reshape(-1).int()]
-    print("[ref] scaled A: ", absmax)
+    # print("[ref] scaled A: ", absmax)
     blocks = absmax.shape[-1] // 256
     res = absmax.shape[-1] % 256
     if res != 0:
-        print("res: ", res)
         absmax = F_T.pad(absmax, (0, 256 - res), mode="constant", value=0)
-    print("[ref] absmax: ", quant_state.absmax)
     absmax = (absmax.view(-1, 256) * quant_state.absmax.view(-1, 1)).to(quant_state.dtype).reshape(-1)
-    print("[ref] mul: ", absmax)
     absmax = absmax[: blocks * 256 + res]
     absmax = absmax.reshape(A.shape)
     absmax += offset
-    print("[ref] biased: ", absmax)
     return absmax
 
 
@@ -217,7 +226,7 @@ def dequant_nf4_fp16(
         # raise NotImplementedError("Fuck")
         # print("Quant state nested: ", quant_state.state2)
         absmax_orig = absmax
-        # absmax_ref = dequant_8bit(absmax_orig, quant_state.offset, quant_state.state2)
+        # absmax = dequant_8bit(absmax_orig, quant_state.offset, quant_state.state2)
         # print("absmax shape out: ", absmax.shape, " absmax in shape: ", absmax_orig.shape)
         assert quant_state.state2.quant_type == "int8"
         assert quant_state.offset.numel() == 1
