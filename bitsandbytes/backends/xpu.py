@@ -3,6 +3,7 @@ from typing import Literal, Optional, Tuple
 import torch
 
 from bitsandbytes import functional as F
+import torch.nn.functional as F_T
 from bitsandbytes.utils import QuantState
 import triton
 import triton.language as tl
@@ -35,7 +36,7 @@ Tensor = torch.Tensor
 #     key=['SPLIT_SIZE'],
 # )
 @triton.jit
-def dequant_kernel(
+def dequant_4bit_kernel(
     a_ptr, c_ptr, quant_ptr, absmax_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr
 ):
     PAIRED_QUANT_BLOCK = QUANT_BLOCK // 2
@@ -75,18 +76,95 @@ def dequant_kernel(
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
 
+@triton.jit
+def dequant_8bit_kernel(
+    a_ptr, c_ptr, quant_ptr, absmax_ptr, bias_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr
+):
+    pid = tl.program_id(axis=0)  # We use a 1D launch grid so axis is 0.
+    block_start = pid * SPLIT_SIZE
+    offsets = block_start + tl.arange(0, SPLIT_SIZE)
+    mask = offsets < num_paired_elements
+
+    a = tl.load(a_ptr + offsets, mask)
+    a = a.to(tl.uint8, bitcast=True)
+
+
+    # print("a: ", a)
+
+    bias = tl.load(bias_ptr)
+    # print("bias: ", bias)
+
+    # apply conversion
+    scaled_int8 = tl.load(quant_ptr + a, mask)
+
+    # print("scaled: ", scaled_int8)
+
+    abs_blocks_lim = (
+        num_paired_elements // QUANT_BLOCK
+    ) * QUANT_BLOCK + num_paired_elements % QUANT_BLOCK
+    abs_offsets = offsets // QUANT_BLOCK
+    mask_blocked = offsets < abs_blocks_lim
+
+    absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked)
+    # print("absmax: ", absmax)
+
+    # apply scales
+    out_dq = scaled_int8 * absmax
+    # print("mul: ", out_dq)
+    out_dq = out_dq + bias
+    # print("biased: ", out_dq)
+
+    # out_block_start = pid * SPLIT_SIZE
+    offs = block_start + tl.arange(0, SPLIT_SIZE)
+    mask = offs < num_paired_elements
+    tl.store(c_ptr + offs, out_dq, mask)
+
+def dequant_int8_fp16(
+    A_nf4: torch.Tensor,
+    bias: torch.Tensor,
+    quant_state: QuantState,
+    absmax: torch.Tensor,
+    out: torch.Tensor,
+    quant_blocksize: int = 64
+):
+    # breakpoint()
+    # print("absmax_orig: ", A_nf4)
+    DEVICE = triton.runtime.driver.active.get_active_torch_device()
+    quant_state_code = quant_state.code.to(device=DEVICE)
+
+    number_of_paired_elements = A_nf4.numel()
+    # we assume that split_size > quant_blocksize
+
+    SPLIT_SIZE = 512
+    # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
+    grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
+    # print("split: ", split_size, " grid: ", grid)
+    # start = time.time()
+    dequant_8bit_kernel[grid](
+        A_nf4, out, quant_state_code, absmax, bias, number_of_paired_elements, quant_blocksize, SPLIT_SIZE
+    )
+    # print("out: ", out)
+    return  out
+
 
 def dequant_8bit(A, offset, quant_state):
     assert A.dtype == torch.uint8
+    print("[ref] absmax A: ", A)
+    print("[ref] bias: ", offset)
     absmax = quant_state.code[A.reshape(-1).int()]
+    print("[ref] scaled A: ", absmax)
     blocks = absmax.shape[-1] // 256
     res = absmax.shape[-1] % 256
     if res != 0:
-        absmax = F.pad(absmax, (0, 256 - res), mode="constant", value=0)
+        print("res: ", res)
+        absmax = F_T.pad(absmax, (0, 256 - res), mode="constant", value=0)
+    print("[ref] absmax: ", quant_state.absmax)
     absmax = (absmax.view(-1, 256) * quant_state.absmax.view(-1, 1)).to(quant_state.dtype).reshape(-1)
+    print("[ref] mul: ", absmax)
     absmax = absmax[: blocks * 256 + res]
     absmax = absmax.reshape(A.shape)
     absmax += offset
+    print("[ref] biased: ", absmax)
     return absmax
 
 
@@ -132,7 +210,23 @@ def dequant_nf4_fp16(
         # import time
         # start = time.time()
         # raise NotImplementedError("Fuck")
-        absmax = dequant_8bit(absmax, quant_state.offset, quant_state.state2)
+        # print("Quant state nested: ", quant_state.state2)
+        absmax_orig = absmax
+        # absmax_ref = dequant_8bit(absmax_orig, quant_state.offset, quant_state.state2)
+        # print("absmax shape out: ", absmax.shape, " absmax in shape: ", absmax_orig.shape)
+        assert quant_state.state2.quant_type == "int8"
+        assert quant_state.offset.numel() == 1
+        absmax_out = torch.empty(absmax.shape, dtype=quant_state.state2.dtype, device=absmax.device)
+        absmax = dequant_int8_fp16(absmax_orig, quant_state.offset, quant_state.state2,  quant_state.state2.absmax, absmax_out, quant_state.state2.blocksize)
+        # max_diff = absmax_ref - absmax
+
+        # print("triton absmax_ref: ", absmax)
+        # print("    python absmax: ", absmax_ref)
+        # assert torch.allclose(
+        #     absmax_ref, absmax, atol=1e-2, rtol=0
+        # ), f"dequantized weight not close to original, max diff: {max_diff} First failed"
+        # exit(0)
+        # dequant_nf4_fp16(A, quant_state, absmax, out, blocksize, quant_type)
         # print("dequant_8bit: ", (time.time() - start), "s")
 
     if out is None:
@@ -150,12 +244,13 @@ def dequant_nf4_fp16(
     grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
     # print("split: ", split_size, " grid: ", grid)
     # start = time.time()
-    dequant_kernel[grid](
+    dequant_4bit_kernel[grid](
         A_nf4, out, quant_state_code, absmax, number_of_paired_elements, quant_state.blocksize, SPLIT_SIZE
     )
     # print("dequant_kernel: ", (time.time() - start), "s")
 
     if transpose:
+        print("Transposing!")
         out = out.t()
 
     return out
