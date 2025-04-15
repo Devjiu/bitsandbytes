@@ -75,20 +75,115 @@ def dequant_4bit_kernel(
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
 
-@triton.autotune(
-    configs=[
-        triton.Config({'SPLIT_SIZE': 64}),
-        triton.Config({'SPLIT_SIZE': 128}),
-        triton.Config({'SPLIT_SIZE': 256}),
-        triton.Config({'SPLIT_SIZE': 512}),
-        triton.Config({'SPLIT_SIZE': 1024}),
-        triton.Config({'SPLIT_SIZE': 2048}),
-        triton.Config({'SPLIT_SIZE': 4096}),
-        triton.Config({'SPLIT_SIZE': 8192}),
-        triton.Config({'SPLIT_SIZE': 16384}),
-    ],
-    key=['SPLIT_SIZE'],
-)
+
+@triton.jit
+def dequant_4bit_kernel_2d(
+    a_ptr, c_ptr, quant_ptr, absmax_ptr, #
+    R, C, #
+    stride_a_row, stride_a_col, #
+    QUANT_BLOCK: tl.constexpr,  #
+    SPLIT_ROW: tl.constexpr,    #
+    SPLIT_COL: tl.constexpr,    #
+    GROUP_SIZE_M: tl.constexpr, #
+):
+    pid = tl.program_id(axis=0)
+    # print("R ", R, " C ", C)
+    num_pid_m = tl.cdiv(R, SPLIT_ROW)
+    num_pid_n = tl.cdiv(C, SPLIT_COL)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    start_r = pid_m * SPLIT_ROW
+    start_c = pid_n * SPLIT_COL
+
+    offs_a_row = start_r + tl.arange(0, SPLIT_ROW)
+    offs_a_row = tl.where(offs_a_row < R, offs_a_row, 0)
+    offs_a_col = start_c + tl.arange(0, SPLIT_COL)
+    offs_a_col = tl.where(offs_a_col < C, offs_a_col, 0)
+    # offs_bn = tl.where(offs_bn < N, offs_bn, 0)
+
+    offs_a_row = tl.max_contiguous(tl.multiple_of(offs_a_row, SPLIT_ROW), SPLIT_ROW)
+    offs_a_col = tl.max_contiguous(tl.multiple_of(offs_a_col, SPLIT_COL), SPLIT_COL)
+
+    # print("offs row: ", offs_a_row)
+    # print("offs col: ", offs_a_col)
+    # print("strides row: ", stride_a_row, " stride col: ", stride_a_col)
+    # offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, SPLIT_COL), SPLIT_COL)
+    # offs_k = tl.arange(0, BLOCK_SIZE_K)
+    offsets = (offs_a_row[:, None] * stride_a_row + offs_a_col[None, :] * stride_a_col)
+    # print("total offsets: ", offsets)
+    a_ptrs = a_ptr + offsets
+
+    # a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+    a = tl.load(a_ptrs)
+    a = a.to(tl.uint8, bitcast=True)
+    # print("loaded a: ", a)
+
+    PAIRED_QUANT_BLOCK = QUANT_BLOCK // 2
+
+    # higher 4bits from uint8 packed tensor
+    higher = a & 0xF
+    # lower 4bits
+    lower = a >> 4
+
+    # print("int4 higher: ", higher)
+    # print("int4  lower: ", lower)
+
+    # apply conversion
+    higher_nf4 = tl.load(quant_ptr + higher)
+    lower_nf4 = tl.load(quant_ptr + lower)
+
+    # print("converted higher: ", higher_nf4)
+    # print("converted lower: ", lower_nf4)
+
+    num_paired_elements = R * C * 2
+    abs_blocks_lim = (
+        num_paired_elements // PAIRED_QUANT_BLOCK
+    ) * PAIRED_QUANT_BLOCK + num_paired_elements % PAIRED_QUANT_BLOCK
+    abs_offsets = offsets // PAIRED_QUANT_BLOCK
+    # print("abs offsets: ", abs_offsets)
+    # print("abs_limit: ", abs_blocks_lim)
+    mask_blocked = offsets < abs_blocks_lim
+    absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked)
+
+    # apply scales
+    mul_high = higher_nf4 * absmax
+    mul_low = lower_nf4 * absmax
+
+    out_dq = tl.interleave(mul_low, mul_high)
+
+    # print("interleaved out: ", out_dq)
+
+    out_start_c = pid_n * SPLIT_COL * 2
+    offs_a_col = out_start_c + tl.arange(0, SPLIT_COL * 2)
+    offs_a_col = tl.where(offs_a_col < C * 2, offs_a_col, 0)
+    # out_block_start = pid * SPLIT_SIZE * 2
+    offsets = (offs_a_row[:, None] * stride_a_row * 2 + offs_a_col[None, :] * stride_a_col)
+    # print("out offsets: ", offsets)
+    # offs = out_block_start + tl.arange(0, SPLIT_SIZE * 2)
+    mask = offsets < num_paired_elements * 2
+    # c_mask = (offs_a_row[:, None] < R) & (offs_a_col[None, :] < C * 2)
+    # tl.store(c_ptr + offs, out_dq, mask)
+    tl.store(c_ptr + offsets, out_dq, mask)
+
+# @triton.autotune(
+#     configs=[
+#         triton.Config({'SPLIT_SIZE': 64}),
+#         triton.Config({'SPLIT_SIZE': 128}),
+#         triton.Config({'SPLIT_SIZE': 256}),
+#         triton.Config({'SPLIT_SIZE': 512}),
+#         triton.Config({'SPLIT_SIZE': 1024}),
+#         triton.Config({'SPLIT_SIZE': 2048}),
+#         triton.Config({'SPLIT_SIZE': 4096}),
+#         triton.Config({'SPLIT_SIZE': 8192}),
+#         triton.Config({'SPLIT_SIZE': 16384}),
+#     ],
+#     key=['SPLIT_SIZE'],
+# )
 @triton.jit
 def dequant_8bit_kernel(
     a_ptr,
@@ -153,13 +248,13 @@ def dequant_int8_fp16(
     number_of_paired_elements = A_nf4.numel()
     # we assume that split_size > quant_blocksize
 
-    # SPLIT_SIZE = 512
-    grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]), )
-    # grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
+    SPLIT_SIZE = 256
+    # grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]), )
+    grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
     # print("split: ", split_size, " grid: ", grid)
     # start = time.time()
     dequant_8bit_kernel[grid](
-        A_nf4, out, quant_state_code, absmax, bias, number_of_paired_elements, quant_blocksize
+        A_nf4, out, quant_state_code, absmax, bias, number_of_paired_elements, quant_blocksize, SPLIT_SIZE
     )
     # print("out: ", out)
     return out
@@ -180,6 +275,34 @@ def dequant_8bit(A, offset, quant_state):
     absmax = absmax.reshape(A.shape)
     absmax += offset
     return absmax
+
+def dequantize_nf4(a: torch.Tensor, out: torch.Tensor, quant_range: torch.Tensor, absmax: torch.Tensor, blocksize):
+    a = a.reshape(-1)
+    out_dq = torch.empty(a.size(0) * 2, dtype=torch.int32)
+    n = out_dq.numel()
+    print("initial A: ", a)
+    print("initial A: ", a.shape)
+    # higher 4bits from uint8 packed tensor
+    out_dq[1::2] = a & 0xF
+    # lower 4bits
+    out_dq[::2] = a >> 4
+    out_dq = quant_range[out_dq]
+    print("ref out_dq nf4: ", out_dq)
+    blocks = n // blocksize
+    blocks += 1 if n % blocksize > 0 else 0
+    rem = n % blocksize
+
+    has_rem = rem > 0
+    if has_rem:
+        assert False and "not implemented"
+    else:
+        print("out_dq reshaped: ", out_dq.view(-1, blocksize).shape)
+        # print("absmax reshaped: ", absmax.view(-1, 1))
+        print("absmax reshaped: ", absmax.view(-1, 1).shape)
+        print("[dequantize_nf4] out shape: ", out.shape)
+        print("ref mul: ", out_dq.view(-1, blocksize) * absmax.view(-1, 1))
+        out = (out_dq.view(-1, blocksize) * absmax.view(-1, 1)).reshape(out.shape).to(out.dtype)
+    return out
 
 
 def dequant_nf4_fp16(
@@ -259,6 +382,59 @@ def dequant_nf4_fp16(
     # so total amount of data is 2 * elem_count
     number_of_paired_elements = A_nf4.numel()
     # we assume that split_size > quant_blocksize
+
+    import math
+    SPLIT_R = 16
+    SPLIT_C = 16
+    GROUP_M = 2
+    R, C = out.shape
+    C = C // 2
+
+    # orig_uint8 = A_nf4.to(torch.uint8)
+    # print("uint8 shape: ", orig_uint8.shape, " stride: ", orig_uint8.stride())
+    # shaped_A = orig_uint8.view(R, C)
+    # print("orig: ", orig_uint8[128:132, :])
+    # print("shaped: ", shaped_A.shape, " stride: ", shaped_A.stride())
+    # # shaped_uint8 = shaped_A.to(torch.uint8)
+    # print("ref A: ", shaped_A[:4, :4])
+    # high = shaped_A[:4, :4] & 0xF
+    # low  = shaped_A[:4, :4] >> 4
+    # print("ref A high: ", high)
+    # print("ref A  low: ", low)
+
+    # qs_cpu = quant_state_code.cpu().half()
+    # print("quant code: ", qs_cpu)
+    # h_cpu = high.cpu().view(-1)
+    # l_cpu = low.cpu().view(-1)
+    # print("h_cpu ", h_cpu, " l_cpu ", l_cpu)
+    # out_dq = torch.empty(16, dtype=torch.int32)
+    # out_dq[:] = h_cpu
+    # h_nf4 = qs_cpu[out_dq]
+    # out_dq = torch.empty(16, dtype=torch.int32)
+    # out_dq[:] = l_cpu
+    # l_nf4 = qs_cpu[out_dq]
+    # print("ref A high nf4: ", h_nf4.view(4, 4))
+    # print("ref A  low nf4: ", l_nf4.view(4, 4))
+
+    # dq_ref = dequantize_nf4(A_nf4.cpu(), out.cpu(), qs_cpu, absmax.cpu(), quant_state.blocksize)
+    # print("[ref] dequantized: ", dq_ref[:8, :8])
+    # R = int(math.sqrt(R*2))
+    # C = R
+    # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
+    grid = (triton.cdiv(R, SPLIT_R) * triton.cdiv(C, SPLIT_C), )
+    # print("split: ", split_size, " grid: ", grid)
+    # start = time.time()
+    # print("A_nf4 shape: ", A_nf4.shape, " stride: ", A_nf4.stride())
+    # print("out shape: ", out.shape, " stride: ", out.stride())
+    dequant_4bit_kernel_2d[grid](
+        A_nf4, out, quant_state_code, absmax, R, C, C, out.stride(1), quant_state.blocksize, SPLIT_R, SPLIT_C, GROUP_M
+    )
+
+    if transpose:
+        print("Transposing!")
+        out = out.t()
+
+    return out
 
     SPLIT_SIZE = 512
     # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )

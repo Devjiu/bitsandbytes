@@ -1539,6 +1539,8 @@ def test_4bit_compressed_stats(quant_type, device):
         for i in range(10):
             A1 = torch.randn(1024, 1024, device=device).half()
             q2, SA2 = F.quantize_4bit(A1, blocksize=blocksize, quant_type=quant_type)
+            # print("orig a shape: ", A1.shape)
+            # print("quant a shape: ", q2.shape)
             q3, SA3 = F.quantize_4bit(A1, blocksize=blocksize, compress_statistics=True, quant_type=quant_type)
             A2 = F.dequantize_4bit(q2, SA2, quant_type=quant_type)
             A3 = F.dequantize_4bit(q3, SA3, quant_type=quant_type)
@@ -1564,6 +1566,7 @@ def test_4bit_compressed_stats(quant_type, device):
         # print(sum(errs1)/len(errs1), blocksize, quant_type)
         # print(sum(errs2)/len(errs2), blocksize, quant_type)
 
+torch.manual_seed(0)
 
 # @pytest.mark.skipif(SKIP_4BIT_TESTS, reason="Not testing 4bit yet")
 @pytest.mark.parametrize("quant_type", ["nf4"])
@@ -1571,8 +1574,10 @@ def test_4bit_compressed_stats(quant_type, device):
 @pytest.mark.benchmark
 def test_bench_4bit_dequant(quant_type, device):
     blocksize = 256
-    a = torch.rand(1024 * 12 * 4, 1024 * 12, device=device).half()
+    a = torch.rand(64 * 12 * 4, 64 * 12, device=device).half()
     qa, SA = F.quantize_4bit(a, blocksize=blocksize, quant_type=quant_type)
+    print("orig a shape: ", a.shape)
+    print("quant a shape: ", qa.shape)
 
     input_size = a.numel() / 2
     output_size = a.numel() * 2
@@ -1580,7 +1585,7 @@ def test_bench_4bit_dequant(quant_type, device):
     GB = num_bytes / 1e9
     max_theoretical_s = GB / 768
     # print(max_theoretical_s*1e6)
-    b = torch.randn(128, 1024 * 12, device=device).half()
+    b = torch.randn(128, 64 * 12, device=device).half()
 
     iters = 100
     if device == "cuda":
