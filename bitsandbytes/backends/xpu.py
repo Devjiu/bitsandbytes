@@ -78,13 +78,18 @@ def dequant_4bit_kernel(
 
 @triton.jit
 def dequant_4bit_kernel_2d(
-    a_ptr, c_ptr, quant_ptr, absmax_ptr, #
-    R, C, #
-    stride_a_row, stride_a_col, #
+    a_ptr,
+    c_ptr,
+    quant_ptr,
+    absmax_ptr,  #
+    R,
+    C,  #
+    stride_a_row,
+    stride_a_col,  #
     QUANT_BLOCK: tl.constexpr,  #
-    SPLIT_ROW: tl.constexpr,    #
-    SPLIT_COL: tl.constexpr,    #
-    GROUP_SIZE_M: tl.constexpr, #
+    SPLIT_ROW: tl.constexpr,  #
+    SPLIT_COL: tl.constexpr,  #
+    GROUP_SIZE_M: tl.constexpr,  #
 ):
     pid = tl.program_id(axis=0)
     # print("R ", R, " C ", C)
@@ -114,7 +119,7 @@ def dequant_4bit_kernel_2d(
     # print("strides row: ", stride_a_row, " stride col: ", stride_a_col)
     # offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, SPLIT_COL), SPLIT_COL)
     # offs_k = tl.arange(0, BLOCK_SIZE_K)
-    offsets = (offs_a_row[:, None] * stride_a_row + offs_a_col[None, :] * stride_a_col)
+    offsets = offs_a_row[:, None] * stride_a_row + offs_a_col[None, :] * stride_a_col
     # print("total offsets: ", offsets)
     a_ptrs = a_ptr + offsets
 
@@ -162,13 +167,14 @@ def dequant_4bit_kernel_2d(
     offs_a_col = out_start_c + tl.arange(0, SPLIT_COL * 2)
     offs_a_col = tl.where(offs_a_col < C * 2, offs_a_col, 0)
     # out_block_start = pid * SPLIT_SIZE * 2
-    offsets = (offs_a_row[:, None] * stride_a_row * 2 + offs_a_col[None, :] * stride_a_col)
+    offsets = offs_a_row[:, None] * stride_a_row * 2 + offs_a_col[None, :] * stride_a_col
     # print("out offsets: ", offsets)
     # offs = out_block_start + tl.arange(0, SPLIT_SIZE * 2)
     mask = offsets < num_paired_elements * 2
     # c_mask = (offs_a_row[:, None] < R) & (offs_a_col[None, :] < C * 2)
     # tl.store(c_ptr + offs, out_dq, mask)
     tl.store(c_ptr + offsets, out_dq, mask)
+
 
 # @triton.autotune(
 #     configs=[
@@ -275,6 +281,7 @@ def dequant_8bit(A, offset, quant_state):
     absmax = absmax.reshape(A.shape)
     absmax += offset
     return absmax
+
 
 def dequantize_nf4(a: torch.Tensor, out: torch.Tensor, quant_range: torch.Tensor, absmax: torch.Tensor, blocksize):
     a = a.reshape(-1)
@@ -383,7 +390,6 @@ def dequant_nf4_fp16(
     number_of_paired_elements = A_nf4.numel()
     # we assume that split_size > quant_blocksize
 
-    import math
     SPLIT_R = 16
     SPLIT_C = 16
     GROUP_M = 2
@@ -421,7 +427,7 @@ def dequant_nf4_fp16(
     # R = int(math.sqrt(R*2))
     # C = R
     # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
-    grid = (triton.cdiv(R, SPLIT_R) * triton.cdiv(C, SPLIT_C), )
+    grid = (triton.cdiv(R, SPLIT_R) * triton.cdiv(C, SPLIT_C),)
     # print("split: ", split_size, " grid: ", grid)
     # start = time.time()
     # print("A_nf4 shape: ", A_nf4.shape, " stride: ", A_nf4.stride())

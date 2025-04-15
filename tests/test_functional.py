@@ -1566,7 +1566,9 @@ def test_4bit_compressed_stats(quant_type, device):
         # print(sum(errs1)/len(errs1), blocksize, quant_type)
         # print(sum(errs2)/len(errs2), blocksize, quant_type)
 
+
 torch.manual_seed(0)
+
 
 # @pytest.mark.skipif(SKIP_4BIT_TESTS, reason="Not testing 4bit yet")
 @pytest.mark.parametrize("quant_type", ["nf4"])
