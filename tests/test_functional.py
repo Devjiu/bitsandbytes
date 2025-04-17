@@ -1576,10 +1576,8 @@ torch.manual_seed(0)
 @pytest.mark.benchmark
 def test_bench_4bit_dequant(quant_type, device):
     blocksize = 256
-    a = torch.rand(64 * 12 * 4, 64 * 12, device=device).half()
+    a = torch.rand(1024 * 12 * 4, 1024 * 12, device=device).half()
     qa, SA = F.quantize_4bit(a, blocksize=blocksize, quant_type=quant_type)
-    print("orig a shape: ", a.shape)
-    print("quant a shape: ", qa.shape)
 
     input_size = a.numel() / 2
     output_size = a.numel() * 2
@@ -1587,7 +1585,7 @@ def test_bench_4bit_dequant(quant_type, device):
     GB = num_bytes / 1e9
     max_theoretical_s = GB / 768
     # print(max_theoretical_s*1e6)
-    b = torch.randn(128, 64 * 12, device=device).half()
+    b = torch.randn(128, 1024 * 12, device=device).half()
 
     iters = 100
     if device == "cuda":

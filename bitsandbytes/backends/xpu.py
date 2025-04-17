@@ -75,7 +75,22 @@ def dequant_4bit_kernel(
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
 
+def matmul_get_configs():
+    return [
+        triton.Config({'SPLIT_ROW': SPLIT_ROW, 'SPLIT_COL': SPLIT_COL, "GROUP_SIZE_M" : GROUP_M, "grf_mode": grf}, num_stages=s, num_warps=w) \
+        for SPLIT_ROW in [16, 32, 64, 128, 256] \
+        for SPLIT_COL in [16, 32, 64, 128, 256] \
+        for GROUP_M in [4] \
+        for s in [4] \
+        for w in [32] \
+        for grf in ["large", "auto"] \
+    ]
 
+
+@triton.autotune(
+    configs=matmul_get_configs(),
+    key=["R", "C"],
+)
 @triton.jit
 def dequant_4bit_kernel_2d(
     a_ptr,
@@ -105,14 +120,19 @@ def dequant_4bit_kernel_2d(
     start_r = pid_m * SPLIT_ROW
     start_c = pid_n * SPLIT_COL
 
-    offs_a_row = start_r + tl.arange(0, SPLIT_ROW)
-    offs_a_row = tl.where(offs_a_row < R, offs_a_row, 0)
-    offs_a_col = start_c + tl.arange(0, SPLIT_COL)
-    offs_a_col = tl.where(offs_a_col < C, offs_a_col, 0)
+    # offs_a_row = start_r + tl.arange(0, SPLIT_ROW)
+    # offs_a_row = tl.where(offs_a_row < R, offs_a_row, 0)
+    # offs_a_col = start_c + tl.arange(0, SPLIT_COL)
+    # offs_a_col = tl.where(offs_a_col < C, offs_a_col, 0)
     # offs_bn = tl.where(offs_bn < N, offs_bn, 0)
 
-    offs_a_row = tl.max_contiguous(tl.multiple_of(offs_a_row, SPLIT_ROW), SPLIT_ROW)
-    offs_a_col = tl.max_contiguous(tl.multiple_of(offs_a_col, SPLIT_COL), SPLIT_COL)
+    # offs_a_row = tl.max_contiguous(tl.multiple_of(offs_a_row, SPLIT_ROW), SPLIT_ROW)
+    # offs_a_col = tl.max_contiguous(tl.multiple_of(offs_a_col, SPLIT_COL), SPLIT_COL)
+
+    offs_a_row = (start_r + tl.arange(0, SPLIT_ROW)) % R
+    offs_a_col = (start_c + tl.arange(0, SPLIT_COL)) % C
+    # a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    # b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
     # print("offs row: ", offs_a_row)
     # print("offs col: ", offs_a_col)
@@ -391,9 +411,10 @@ def dequant_nf4_fp16(
     # we assume that split_size > quant_blocksize
 
     SPLIT_R = 16
-    SPLIT_C = 16
+    SPLIT_C = 256
     GROUP_M = 2
     R, C = out.shape
+    # print("full tensor shape: ", out.shape)
     C = C // 2
 
     # orig_uint8 = A_nf4.to(torch.uint8)
@@ -427,13 +448,16 @@ def dequant_nf4_fp16(
     # R = int(math.sqrt(R*2))
     # C = R
     # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
-    grid = (triton.cdiv(R, SPLIT_R) * triton.cdiv(C, SPLIT_C),)
+    # print("prev grid: ", triton.cdiv(number_of_paired_elements, 512))
+    # print("grid: ", triton.cdiv(R, SPLIT_R), " ", triton.cdiv(C, SPLIT_C))
+    grid = lambda META: (triton.cdiv(R, META["SPLIT_ROW"]) * triton.cdiv(C, META["SPLIT_COL"]), )
+    # grid = (triton.cdiv(R, SPLIT_R) * triton.cdiv(C, SPLIT_C),)
     # print("split: ", split_size, " grid: ", grid)
     # start = time.time()
     # print("A_nf4 shape: ", A_nf4.shape, " stride: ", A_nf4.stride())
     # print("out shape: ", out.shape, " stride: ", out.stride())
     dequant_4bit_kernel_2d[grid](
-        A_nf4, out, quant_state_code, absmax, R, C, C, out.stride(1), quant_state.blocksize, SPLIT_R, SPLIT_C, GROUP_M
+        A_nf4, out, quant_state_code, absmax, R, C, C, out.stride(1), quant_state.blocksize, #SPLIT_R, SPLIT_C, GROUP_M
     )
 
     if transpose:

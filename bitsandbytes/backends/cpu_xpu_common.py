@@ -491,13 +491,6 @@ def dequantize_4bit_impl(
     if quant_state.nested:
         absmax = dequant_8bit(absmax, quant_state.offset, quant_state.state2)
 
-    # if out is None:
-    #     out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A.device)
-    # out = dequant_nf4_fp16(A, out, quant_state.code, absmax, quant_state.blocksize)
-    # if transpose:
-    #     out = out.t()
-
-    # return out
 
     if ipex_cpu_only and _ipex_cpu_version_prereq(2, 5) and getattr(quant_state, "ipex", False):
         ipex_weight = torch.ops.ipex_prepack.woq_linear_unpack_weight(A, "nf4", quant_state.shape, 2)
@@ -522,9 +515,7 @@ def dequantize_4bit_impl(
     rem = n % blocksize
     has_rem = rem > 0
 
-    # print("Has rem? n - ", n, " blocksize - ", blocksize, " rem - ", rem )
     if has_rem:
-        # print("Has rem: n - ", n, " blocksize - ", blocksize, " rem - ", rem )
         if out is None:
             out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A.device)
         out_reshaped = out.reshape(-1)
