@@ -491,7 +491,6 @@ def dequantize_4bit_impl(
     if quant_state.nested:
         absmax = dequant_8bit(absmax, quant_state.offset, quant_state.state2)
 
-
     if ipex_cpu_only and _ipex_cpu_version_prereq(2, 5) and getattr(quant_state, "ipex", False):
         ipex_weight = torch.ops.ipex_prepack.woq_linear_unpack_weight(A, "nf4", quant_state.shape, 2)
         A = reverse_4bit_compress_format(ipex_weight)

@@ -75,15 +75,20 @@ def dequant_4bit_kernel(
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
 
+
 def matmul_get_configs():
     return [
-        triton.Config({'SPLIT_ROW': SPLIT_ROW, 'SPLIT_COL': SPLIT_COL, "GROUP_SIZE_M" : GROUP_M, "grf_mode": grf}, num_stages=s, num_warps=w) \
-        for SPLIT_ROW in [16, 32, 64, 128, 256] \
-        for SPLIT_COL in [16, 32, 64, 128, 256] \
-        for GROUP_M in [4] \
-        for s in [4] \
-        for w in [32] \
-        for grf in ["large", "auto"] \
+        triton.Config(
+            {"SPLIT_ROW": SPLIT_ROW, "SPLIT_COL": SPLIT_COL, "GROUP_SIZE_M": GROUP_M, "grf_mode": grf},
+            num_stages=s,
+            num_warps=w,
+        )
+        for SPLIT_ROW in [16, 32, 64, 128, 256]
+        for SPLIT_COL in [16, 32, 64, 128, 256]
+        for GROUP_M in [4]
+        for s in [4]
+        for w in [32]
+        for grf in ["large", "auto"]
     ]
 
 
@@ -450,14 +455,22 @@ def dequant_nf4_fp16(
     # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
     # print("prev grid: ", triton.cdiv(number_of_paired_elements, 512))
     # print("grid: ", triton.cdiv(R, SPLIT_R), " ", triton.cdiv(C, SPLIT_C))
-    grid = lambda META: (triton.cdiv(R, META["SPLIT_ROW"]) * triton.cdiv(C, META["SPLIT_COL"]), )
+    grid = lambda META: (triton.cdiv(R, META["SPLIT_ROW"]) * triton.cdiv(C, META["SPLIT_COL"]),)
     # grid = (triton.cdiv(R, SPLIT_R) * triton.cdiv(C, SPLIT_C),)
     # print("split: ", split_size, " grid: ", grid)
     # start = time.time()
     # print("A_nf4 shape: ", A_nf4.shape, " stride: ", A_nf4.stride())
     # print("out shape: ", out.shape, " stride: ", out.stride())
     dequant_4bit_kernel_2d[grid](
-        A_nf4, out, quant_state_code, absmax, R, C, C, out.stride(1), quant_state.blocksize, #SPLIT_R, SPLIT_C, GROUP_M
+        A_nf4,
+        out,
+        quant_state_code,
+        absmax,
+        R,
+        C,
+        C,
+        out.stride(1),
+        quant_state.blocksize,  # SPLIT_R, SPLIT_C, GROUP_M
     )
 
     if transpose:

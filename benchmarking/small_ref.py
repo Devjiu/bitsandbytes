@@ -1,17 +1,14 @@
+import math
+import statistics
+from typing import Literal, Optional
+
 import torch
 
-
 from bitsandbytes import functional as F
+import torch.nn.functional as F_T
 from bitsandbytes.utils import QuantState
-from typing import Literal, Optional, Tuple
-
-
 import triton
 import triton.language as tl
-
-import statistics
-import math
-
 
 k = 20
 
@@ -59,6 +56,7 @@ def dequant_4bit_kernel(
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
 
+
 def dequant_nf4_fp16(
     A_nf4: torch.Tensor,
     quant_state: Optional[QuantState] = None,
@@ -98,20 +96,19 @@ def dequant_nf4_fp16(
         )
 
     if quant_state.nested:
-        raise NotImplementedError("Fuck")
+        # raise NotImplementedError("Fuck")
         # print("Quant state nested: ", quant_state.state2)
         absmax_orig = absmax
         # absmax = dequant_8bit(absmax_orig, quant_state.offset, quant_state.state2)
         # print("absmax shape out: ", absmax.shape, " absmax in shape: ", absmax_orig.shape)
         assert quant_state.state2.quant_type == "int8"
         assert quant_state.offset.numel() == 1
-        absmax_out = torch.empty(absmax.shape, dtype=quant_state.state2.dtype, device=absmax.device)
+        # absmax_out = torch.empty(absmax.shape, dtype=quant_state.state2.dtype, device=absmax.device)
         absmax = dequant_int8_fp16(
             absmax_orig,
             quant_state.offset,
             quant_state.state2,
             quant_state.state2.absmax,
-            absmax_out,
             quant_state.state2.blocksize,
         )
 
@@ -139,12 +136,12 @@ def dequant_nf4_fp16(
 
 def matmul_get_configs():
     return [
-        triton.Config({'SPLIT_ROW': SPLIT_ROW, 'SPLIT_COL': SPLIT_COL, "grf_mode": grf}, num_stages=s, num_warps=w) \
-        for SPLIT_ROW in [16, 32, 64, 128, 256] \
-        for SPLIT_COL in [16, 32, 64, 128, 256] \
-        for s in [3, 4] \
-        for w in [32] \
-        for grf in ["large", "auto"] \
+        triton.Config({"SPLIT_ROW": SPLIT_ROW, "SPLIT_COL": SPLIT_COL, "grf_mode": grf}, num_stages=s, num_warps=w)
+        for SPLIT_ROW in [16, 32, 64, 128, 256]
+        for SPLIT_COL in [16, 32, 64, 128, 256]
+        for s in [3, 4]
+        for w in [32]
+        for grf in ["large", "auto"]
     ]
 
 
@@ -247,6 +244,7 @@ def dequant_4bit_kernel_2d(
     # tl.store(c_ptr + offs, out_dq, mask)
     tl.store(c_ptr + offsets, out_dq, mask)
 
+
 def dequant2d_nf4_fp16(
     A_nf4: torch.Tensor,
     quant_state: Optional[QuantState] = None,
@@ -316,13 +314,30 @@ def dequant2d_nf4_fp16(
     # Triton autotuning for function dequant_4bit_kernel_2d finished after 46.07s;
     # SPLIT_ROW: 64, SPLIT_COL: 32, grf_mode: auto, num_warps: 32, num_ctas: 1, num_stages: 3,
     # grid = lambda META: (triton.cdiv(R, META["SPLIT_ROW"]), triton.cdiv(C, META["SPLIT_COL"]), )
-    grid = (triton.cdiv(R, SPLIT_ROW), triton.cdiv(C, SPLIT_COL),)
+    grid = (
+        triton.cdiv(R, SPLIT_ROW),
+        triton.cdiv(C, SPLIT_COL),
+    )
     # print("split: ", split_size, " grid: ", grid)
     # start = time.time()
     # print("A_nf4 shape: ", A_nf4.shape, " stride: ", A_nf4.stride())
     # print("out shape: ", out.shape, " stride: ", out.stride())
     dequant_4bit_kernel_2d[grid](
-        A_nf4, out, quant_state_code, absmax, R, C, C, out.stride(1), quant_state.blocksize, SPLIT_ROW = SPLIT_ROW, SPLIT_COL = SPLIT_COL, grf_mode = "auto", num_warps = 32, num_ctas = 1, num_stages = 3,
+        A_nf4,
+        out,
+        quant_state_code,
+        absmax,
+        R,
+        C,
+        C,
+        out.stride(1),
+        quant_state.blocksize,
+        SPLIT_ROW=SPLIT_ROW,
+        SPLIT_COL=SPLIT_COL,
+        grf_mode="auto",
+        num_warps=32,
+        num_ctas=1,
+        num_stages=3,
     )
 
     if transpose:
@@ -331,26 +346,38 @@ def dequant2d_nf4_fp16(
 
     return out
 
-def get_absmax(B: torch.Tensor, blocksize: int):
-    n = B.numel()
+# def dequant_8bit(A, offset, quant_state):
+def dequant_int8_fp16(
+    A_nf4: torch.Tensor,
+    bias: torch.Tensor,
+    quant_state: QuantState,
+    absmax: torch.Tensor,
+    quant_blocksize: int = 64,
+):
+    assert A_nf4.dtype == torch.uint8
+    DEVICE = triton.runtime.driver.active.get_active_torch_device()
+    quant_state_code = quant_state.code.to(device=DEVICE)
 
-    blocks = n // blocksize
-    blocks += 1 if n % blocksize > 0 else 0
-    absmax = torch.zeros((blocks,), device=B.device, dtype=B.dtype)
-    rem = n % blocksize
-    has_rem = rem > 0
-
-    # Scale tensor to [-1, 1]
-    B_reshaped = B.reshape(n)
-    B_com = B_reshaped[: n - rem]
-    B_com_reshaped = B_com.reshape(n // blocksize, blocksize)
-    absmax[: blocks - has_rem] = torch.abs(B_com_reshaped).max(dim=-1)[0]
-    if has_rem:
-        absmax[-1] = torch.abs(B_reshaped[n - rem :]).max()
+    absmax = quant_state_code[A_nf4.reshape(-1).int()]
+    # print("[ref] scaled A: ", absmax)
+    blocks = absmax.shape[-1] // quant_blocksize
+    res = absmax.shape[-1] % quant_blocksize
+    if res != 0:
+        absmax = F_T.pad(absmax, (0, quant_blocksize - res), mode="constant", value=0)
+    absmax = (absmax.view(-1, quant_blocksize) * quant_state.absmax.view(-1, 1)).to(quant_state.dtype).reshape(-1)
+    absmax = absmax[: blocks * quant_blocksize + res]
+    absmax = absmax.reshape(A_nf4.shape)
+    absmax += bias
     return absmax
 
-
-def dequantize_nf4(a: torch.Tensor, quant_state: QuantState, out: torch.Tensor, quant_range: torch.Tensor, absmax: torch.Tensor, blocksize):
+def dequantize_nf4(
+    a: torch.Tensor,
+    quant_state: QuantState,
+    out: torch.Tensor,
+    quant_range: torch.Tensor,
+    absmax: torch.Tensor,
+    blocksize,
+):
     a = a.reshape(-1)
     out_dq = torch.empty(a.size(0) * 2, dtype=torch.int32)
     n = out_dq.numel()
@@ -376,10 +403,13 @@ def dequantize_nf4(a: torch.Tensor, quant_state: QuantState, out: torch.Tensor, 
         out = (out_dq.view(-1, blocksize) * absmax.view(-1, 1)).reshape(out.shape).to(out.dtype)
     return out
 
+
 def sum(a: torch.Tensor, b: torch.Tensor):
     return a + b
 
+
 torch.manual_seed(0)
+
 
 def _quantile(a, q):
     n = len(a)
@@ -395,6 +425,7 @@ def _quantile(a, q):
         return (1 - t) * a[lower] + t * a[upper]
 
     return [get_quantile(q) for q in q]
+
 
 def _summarize_statistics(times, quantiles, return_mode):
     if quantiles is not None:
@@ -448,7 +479,6 @@ def mm4_ref(batch=1, seq=1, model=1024, hidden=1024):
         1.0,
     ]
 
-
     B_dq = torch.empty_like(a, dtype=torch.float16)
     di.synchronize()
 
@@ -456,7 +486,7 @@ def mm4_ref(batch=1, seq=1, model=1024, hidden=1024):
     end_event = di.Event(enable_timing=True)
 
     cache_size = 256 * 1024 * 1024
-    cache = torch.empty(int(cache_size // 4), dtype=torch.int, device='xpu')
+    cache = torch.empty(int(cache_size // 4), dtype=torch.int, device="xpu")
     qa = qa.to(device="xpu")
     SA.code = SA.code.to(device="xpu")
     SA.absmax = SA.absmax.to(device="xpu")
