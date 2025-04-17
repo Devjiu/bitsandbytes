@@ -3,9 +3,9 @@ import statistics
 from typing import Literal, Optional
 
 import torch
+import torch.nn.functional as F_T
 
 from bitsandbytes import functional as F
-import torch.nn.functional as F_T
 from bitsandbytes.utils import QuantState
 import triton
 import triton.language as tl
@@ -346,6 +346,7 @@ def dequant2d_nf4_fp16(
 
     return out
 
+
 # def dequant_8bit(A, offset, quant_state):
 def dequant_int8_fp16(
     A_nf4: torch.Tensor,
@@ -369,6 +370,7 @@ def dequant_int8_fp16(
     absmax = absmax.reshape(A_nf4.shape)
     absmax += bias
     return absmax
+
 
 def dequantize_nf4(
     a: torch.Tensor,
