@@ -583,7 +583,7 @@ def gemm_4bit_impl(
         )
     else:
         dqB = dequantize_4bit_impl(B, state, blocksize=state.blocksize)
-        output = torch.matmul(A, dqB.to(A.dtype))
+        output = torch.matmul(A, dqB.to(A.dtype).t())
     if out is not None:
         out.copy_(output)
     else:

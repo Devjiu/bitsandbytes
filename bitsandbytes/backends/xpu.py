@@ -112,7 +112,6 @@ def dequant_4bit_kernel_2d(
     GROUP_SIZE_M: tl.constexpr,  #
 ):
     pid = tl.program_id(axis=0)
-    # print("R ", R, " C ", C)
     num_pid_m = tl.cdiv(R, SPLIT_ROW)
     num_pid_n = tl.cdiv(C, SPLIT_COL)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -125,33 +124,15 @@ def dequant_4bit_kernel_2d(
     start_r = pid_m * SPLIT_ROW
     start_c = pid_n * SPLIT_COL
 
-    # offs_a_row = start_r + tl.arange(0, SPLIT_ROW)
-    # offs_a_row = tl.where(offs_a_row < R, offs_a_row, 0)
-    # offs_a_col = start_c + tl.arange(0, SPLIT_COL)
-    # offs_a_col = tl.where(offs_a_col < C, offs_a_col, 0)
-    # offs_bn = tl.where(offs_bn < N, offs_bn, 0)
-
-    # offs_a_row = tl.max_contiguous(tl.multiple_of(offs_a_row, SPLIT_ROW), SPLIT_ROW)
-    # offs_a_col = tl.max_contiguous(tl.multiple_of(offs_a_col, SPLIT_COL), SPLIT_COL)
-
     offs_a_row = (start_r + tl.arange(0, SPLIT_ROW)) % R
     offs_a_col = (start_c + tl.arange(0, SPLIT_COL)) % C
-    # a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    # b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-    # print("offs row: ", offs_a_row)
-    # print("offs col: ", offs_a_col)
-    # print("strides row: ", stride_a_row, " stride col: ", stride_a_col)
-    # offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, SPLIT_COL), SPLIT_COL)
-    # offs_k = tl.arange(0, BLOCK_SIZE_K)
     offsets = offs_a_row[:, None] * stride_a_row + offs_a_col[None, :] * stride_a_col
-    # print("total offsets: ", offsets)
     a_ptrs = a_ptr + offsets
 
     # a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
     a = tl.load(a_ptrs)
     a = a.to(tl.uint8, bitcast=True)
-    # print("loaded a: ", a)
 
     PAIRED_QUANT_BLOCK = QUANT_BLOCK // 2
 
@@ -160,23 +141,15 @@ def dequant_4bit_kernel_2d(
     # lower 4bits
     lower = a >> 4
 
-    # print("int4 higher: ", higher)
-    # print("int4  lower: ", lower)
-
     # apply conversion
     higher_nf4 = tl.load(quant_ptr + higher)
     lower_nf4 = tl.load(quant_ptr + lower)
-
-    # print("converted higher: ", higher_nf4)
-    # print("converted lower: ", lower_nf4)
 
     num_paired_elements = R * C * 2
     abs_blocks_lim = (
         num_paired_elements // PAIRED_QUANT_BLOCK
     ) * PAIRED_QUANT_BLOCK + num_paired_elements % PAIRED_QUANT_BLOCK
     abs_offsets = offsets // PAIRED_QUANT_BLOCK
-    # print("abs offsets: ", abs_offsets)
-    # print("abs_limit: ", abs_blocks_lim)
     mask_blocked = offsets < abs_blocks_lim
     absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked)
 
@@ -186,18 +159,11 @@ def dequant_4bit_kernel_2d(
 
     out_dq = tl.interleave(mul_low, mul_high)
 
-    # print("interleaved out: ", out_dq)
-
     out_start_c = pid_n * SPLIT_COL * 2
     offs_a_col = out_start_c + tl.arange(0, SPLIT_COL * 2)
     offs_a_col = tl.where(offs_a_col < C * 2, offs_a_col, 0)
-    # out_block_start = pid * SPLIT_SIZE * 2
     offsets = offs_a_row[:, None] * stride_a_row * 2 + offs_a_col[None, :] * stride_a_col
-    # print("out offsets: ", offsets)
-    # offs = out_block_start + tl.arange(0, SPLIT_SIZE * 2)
     mask = offsets < num_paired_elements * 2
-    # c_mask = (offs_a_row[:, None] < R) & (offs_a_col[None, :] < C * 2)
-    # tl.store(c_ptr + offs, out_dq, mask)
     tl.store(c_ptr + offsets, out_dq, mask)
 
 
@@ -234,30 +200,20 @@ def dequant_8bit_kernel(
     a = tl.load(a_ptr + offsets, mask)
     a = a.to(tl.uint8, bitcast=True)
 
-    # print("a: ", a)
-
     bias = tl.load(bias_ptr)
-    # print("bias: ", bias)
 
     # apply conversion
     scaled_int8 = tl.load(quant_ptr + a, mask)
-
-    # print("scaled: ", scaled_int8)
 
     abs_blocks_lim = (num_paired_elements // QUANT_BLOCK) * QUANT_BLOCK + num_paired_elements % QUANT_BLOCK
     abs_offsets = offsets // QUANT_BLOCK
     mask_blocked = offsets < abs_blocks_lim
 
     absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked)
-    # print("absmax: ", absmax)
-
     # apply scales
     out_dq = scaled_int8 * absmax
-    # print("mul: ", out_dq)
     out_dq = out_dq + bias
-    # print("biased: ", out_dq)
 
-    # out_block_start = pid * SPLIT_SIZE
     offs = block_start + tl.arange(0, SPLIT_SIZE)
     mask = offs < num_paired_elements
     tl.store(c_ptr + offs, out_dq, mask)
@@ -271,8 +227,6 @@ def dequant_int8_fp16(
     out: torch.Tensor,
     quant_blocksize: int = 64,
 ):
-    # breakpoint()
-    # print("absmax_orig: ", A_nf4)
     DEVICE = triton.runtime.driver.active.get_active_torch_device()
     quant_state_code = quant_state.code.to(device=DEVICE)
 
@@ -282,21 +236,15 @@ def dequant_int8_fp16(
     SPLIT_SIZE = 256
     # grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]), )
     grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
-    # print("split: ", split_size, " grid: ", grid)
-    # start = time.time()
     dequant_8bit_kernel[grid](
         A_nf4, out, quant_state_code, absmax, bias, number_of_paired_elements, quant_blocksize, SPLIT_SIZE
     )
-    # print("out: ", out)
     return out
 
 
 def dequant_8bit(A, offset, quant_state):
     assert A.dtype == torch.uint8
-    # print("[ref] absmax A: ", A)
-    # print("[ref] bias: ", offset)
     absmax = quant_state.code[A.reshape(-1).int()]
-    # print("[ref] scaled A: ", absmax)
     blocks = absmax.shape[-1] // 256
     res = absmax.shape[-1] % 256
     if res != 0:
@@ -347,9 +295,7 @@ def dequant_nf4_fp16(
 ):
     transpose = True if A_nf4.shape[0] == 1 else False
     DEVICE = triton.runtime.driver.active.get_active_torch_device()
-    # A_nf4 = A_nf4.to(device=DEVICE)
-    # out = out.to(device=DEVICE)
-    # absmax = absmax.to(device=DEVICE)
+
     if A_nf4.dtype != torch.uint8:
         print("[Warning] Forcing conversion of {A_nf4.dtype} to uint8.")
         bytes_value = A_nf4.cpu().numpy().tobytes()
@@ -376,13 +322,7 @@ def dequant_nf4_fp16(
         )
 
     if quant_state.nested:
-        # import time
-        # start = time.time()
-        # raise NotImplementedError("Fuck")
-        # print("Quant state nested: ", quant_state.state2)
         absmax_orig = absmax
-        # absmax = dequant_8bit(absmax_orig, quant_state.offset, quant_state.state2)
-        # print("absmax shape out: ", absmax.shape, " absmax in shape: ", absmax_orig.shape)
         assert quant_state.state2.quant_type == "int8"
         assert quant_state.offset.numel() == 1
         absmax_out = torch.empty(absmax.shape, dtype=quant_state.state2.dtype, device=absmax.device)
@@ -394,16 +334,6 @@ def dequant_nf4_fp16(
             absmax_out,
             quant_state.state2.blocksize,
         )
-        # max_diff = absmax_ref - absmax
-
-        # print("triton absmax_ref: ", absmax)
-        # print("    python absmax: ", absmax_ref)
-        # assert torch.allclose(
-        #     absmax_ref, absmax, atol=1e-2, rtol=0
-        # ), f"dequantized weight not close to original, max diff: {max_diff} First failed"
-        # exit(0)
-        # dequant_nf4_fp16(A, quant_state, absmax, out, blocksize, quant_type)
-        # print("dequant_8bit: ", (time.time() - start), "s")
 
     if out is None:
         out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A_nf4.device)
@@ -422,45 +352,11 @@ def dequant_nf4_fp16(
     # print("full tensor shape: ", out.shape)
     C = C // 2
 
-    # orig_uint8 = A_nf4.to(torch.uint8)
-    # print("uint8 shape: ", orig_uint8.shape, " stride: ", orig_uint8.stride())
-    # shaped_A = orig_uint8.view(R, C)
-    # print("orig: ", orig_uint8[128:132, :])
-    # print("shaped: ", shaped_A.shape, " stride: ", shaped_A.stride())
-    # # shaped_uint8 = shaped_A.to(torch.uint8)
-    # print("ref A: ", shaped_A[:4, :4])
-    # high = shaped_A[:4, :4] & 0xF
-    # low  = shaped_A[:4, :4] >> 4
-    # print("ref A high: ", high)
-    # print("ref A  low: ", low)
-
-    # qs_cpu = quant_state_code.cpu().half()
-    # print("quant code: ", qs_cpu)
-    # h_cpu = high.cpu().view(-1)
-    # l_cpu = low.cpu().view(-1)
-    # print("h_cpu ", h_cpu, " l_cpu ", l_cpu)
-    # out_dq = torch.empty(16, dtype=torch.int32)
-    # out_dq[:] = h_cpu
-    # h_nf4 = qs_cpu[out_dq]
-    # out_dq = torch.empty(16, dtype=torch.int32)
-    # out_dq[:] = l_cpu
-    # l_nf4 = qs_cpu[out_dq]
-    # print("ref A high nf4: ", h_nf4.view(4, 4))
-    # print("ref A  low nf4: ", l_nf4.view(4, 4))
-
-    # dq_ref = dequantize_nf4(A_nf4.cpu(), out.cpu(), qs_cpu, absmax.cpu(), quant_state.blocksize)
-    # print("[ref] dequantized: ", dq_ref[:8, :8])
-    # R = int(math.sqrt(R*2))
-    # C = R
     # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
     # print("prev grid: ", triton.cdiv(number_of_paired_elements, 512))
     # print("grid: ", triton.cdiv(R, SPLIT_R), " ", triton.cdiv(C, SPLIT_C))
     grid = lambda META: (triton.cdiv(R, META["SPLIT_ROW"]) * triton.cdiv(C, META["SPLIT_COL"]),)
     # grid = (triton.cdiv(R, SPLIT_R) * triton.cdiv(C, SPLIT_C),)
-    # print("split: ", split_size, " grid: ", grid)
-    # start = time.time()
-    # print("A_nf4 shape: ", A_nf4.shape, " stride: ", A_nf4.stride())
-    # print("out shape: ", out.shape, " stride: ", out.stride())
     dequant_4bit_kernel_2d[grid](
         A_nf4,
         out,
@@ -482,18 +378,139 @@ def dequant_nf4_fp16(
     SPLIT_SIZE = 512
     # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
     grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
-    # print("split: ", split_size, " grid: ", grid)
-    # start = time.time()
     dequant_4bit_kernel[grid](
         A_nf4, out, quant_state_code, absmax, number_of_paired_elements, quant_state.blocksize, SPLIT_SIZE
     )
-    # print("dequant_kernel: ", (time.time() - start), "s")
 
     if transpose:
         print("Transposing!")
         out = out.t()
 
     return out
+
+@torch.compile
+def comp_dequantize_nf4(
+    a: torch.Tensor,
+    quant_state: QuantState,
+    out: torch.Tensor,
+    quant_range: torch.Tensor,
+    absmax: torch.Tensor,
+    blocksize,
+):
+    a = a.reshape(-1)
+    out_dq = torch.empty(a.size(0) * 2, dtype=torch.int32)
+    n = out_dq.numel()
+    # higher 4bits from uint8 packed tensor
+    out_dq[1::2] = a & 0xF
+    # lower 4bits
+    out_dq[::2] = a >> 4
+    out_dq = quant_range[out_dq]
+    blocks = n // blocksize
+    blocks += 1 if n % blocksize > 0 else 0
+    rem = n % blocksize
+
+    has_rem = rem > 0
+    if has_rem:
+        if out is None:
+            out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=a.device)
+        out_reshaped = out.reshape(-1)
+        out_reshaped[: n - rem] = (
+            out_dq[: n - rem].view(-1, blocksize) * absmax[: blocks - has_rem].view(-1, 1)
+        ).reshape(-1)
+        out_reshaped[n - rem :] = out_dq[n - rem :] * absmax[-1]
+    else:
+        out = (out_dq.view(-1, blocksize) * absmax.view(-1, 1)).reshape(out.shape).to(out.dtype)
+    return out
+
+@torch.compile
+def comp_dequant_int8_fp16(
+    A_nf4: torch.Tensor,
+    bias: torch.Tensor,
+    quant_state: QuantState,
+    absmax: torch.Tensor,
+    quant_blocksize: int = 64,
+):
+    assert A_nf4.dtype == torch.uint8
+    DEVICE = triton.runtime.driver.active.get_active_torch_device()
+    quant_state_code = quant_state.code.to(device=DEVICE)
+
+    absmax = quant_state_code[A_nf4.reshape(-1).int()]
+    # print("[ref] scaled A: ", absmax)
+    blocks = absmax.shape[-1] // quant_blocksize
+    res = absmax.shape[-1] % quant_blocksize
+    if res != 0:
+        absmax = F_T.pad(absmax, (0, quant_blocksize - res), mode="constant", value=0)
+    absmax = (absmax.view(-1, quant_blocksize) * quant_state.absmax.view(-1, 1)).to(quant_state.dtype).reshape(-1)
+    absmax = absmax[: blocks * quant_blocksize + res]
+    absmax = absmax.reshape(A_nf4.shape)
+    absmax += bias
+    return absmax
+
+@torch.compile
+def comp_dequantize_4bit(
+    A: Tensor,
+    quant_state=None,
+    absmax: Tensor = None,
+    out: Tensor = None,
+    blocksize: int = 64,
+    quant_type="nf4",
+) -> Tensor:
+    transpose = True if A.shape[0] == 1 else False
+    A = A.reshape(-1)
+    device = A.device
+    if A.dtype != torch.uint8:
+        bytes_value = A.cpu().numpy().tobytes()
+        A = torch.frombuffer(bytes_value, dtype=torch.uint8).to(device)
+
+    if quant_state is None:
+        assert absmax is not None and out is not None
+
+        quant_state = QuantState(
+            absmax=absmax,
+            shape=out.shape,
+            dtype=out.dtype,
+            blocksize=blocksize,
+            quant_type=quant_type,
+        )
+
+    else:
+        absmax = quant_state.absmax
+
+    quant_state_code = quant_state.code.to(device=A.device)
+
+    if quant_type not in ["nf4", "fp4"]:
+        raise NotImplementedError(
+            f"4-bit quantization data type {quant_state.quant_type} is not implemented for CPU/XPU."
+        )
+
+    if quant_state.nested:
+        absmax = comp_dequant_int8_fp16(absmax, quant_state.offset, quant_state.state2, quant_state.state2.absmax, quant_state.state2.blocksize)
+
+    if out is None:
+        out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A.device)
+
+    # print("Quant state: ", quant_state.__dict__, " code: ", quant_state.code)
+    out = comp_dequantize_nf4(A, quant_state, out, quant_state_code, absmax, quant_state.blocksize)
+
+    # take transpose here because weight is transposed (again) for computation
+    if transpose:
+        out = out.t()
+
+    return out
+
+@torch.compile
+def compiled_nf4_gemm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+    transposed_A=False,
+    transposed_B=False,
+    state: QuantState = None,
+) -> torch.Tensor:
+    dqB = comp_dequantize_4bit(B, state, blocksize=state.blocksize)
+    # print("B shape: ", B.shape, " dq B shape: ", dqB.shape)
+    output = torch.matmul(A, dqB.to(A.dtype).t())
+    return output
 
 
 def assert_on_xpu(tensors):
@@ -632,6 +649,7 @@ class XPUBackend(Backend):
         if blocksize is None:
             blocksize = 64
         assert_on_xpu([A, absmax, out])
+        # triton call actiually
         if quant_type == "nf4":
             output = dequant_nf4_fp16(A, quant_state, absmax, out, blocksize, quant_type)
             return output
@@ -655,6 +673,12 @@ class XPUBackend(Backend):
         assert_on_xpu([A, B, out])
         if state is None:
             raise ValueError("state cannot be None. gemv_4bit() requires the state from quantize_4bit()")
+        # triton call actiually
+        if state.quant_type == "nf4":
+            # print("calling compiled, shapes - A: ", A.shape, " B: ", B.shape, " transpose: ", transposed_A, ", ", transposed_B)
+            output = compiled_nf4_gemm(A, B, out, transposed_A, transposed_B, state)
+            return output
+
         output = gemm_4bit_impl(A, B, out, transposed_A, transposed_B, state)
         return output
 

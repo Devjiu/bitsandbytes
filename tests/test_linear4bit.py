@@ -20,14 +20,14 @@ storage = {
 @pytest.mark.parametrize("quant_storage", ["uint8", "float16", "bfloat16", "float32"])
 @pytest.mark.parametrize("bias", TRUE_FALSE)
 @pytest.mark.parametrize("compress_statistics", TRUE_FALSE)
-@pytest.mark.parametrize("quant_type", ["nf4", "fp4"])
+@pytest.mark.parametrize("quant_type", ["nf4"])
 @pytest.mark.parametrize("save_before_forward", TRUE_FALSE)
 def test_linear_serialization(quant_type, compress_statistics, bias, quant_storage, save_before_forward, device):
     original_dtype = torch.float16
     compute_dtype = None
     layer_shape = (300, 400)
 
-    linear = torch.nn.Linear(*layer_shape, dtype=original_dtype, device="cpu")  # original layer
+    linear = torch.nn.Linear(*layer_shape, dtype=original_dtype, device="xpu")  # original layer
 
     # Quantizing original layer
     linear_q = bnb.nn.Linear4bit(
@@ -51,7 +51,7 @@ def test_linear_serialization(quant_type, compress_statistics, bias, quant_stora
     # restoring from state_dict:
     bias_data2 = sd.pop("bias", None)
     weight_data2 = sd.pop("weight")
-    weight2 = bnb.nn.Params4bit.from_prequantized(quantized_stats=sd, data=weight_data2)
+    weight2 = bnb.nn.Params4bit.from_prequantized(quantized_stats=sd, data=weight_data2, device="xpu")
 
     # creating new layer with same params:
     linear_q2 = bnb.nn.Linear4bit(

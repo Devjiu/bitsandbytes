@@ -475,6 +475,7 @@ class MatMul4Bit(torch.autograd.Function):
             if bias is not None:
                 output += bias
         else:
+            print("calling (functional) forward with dequantize_4bit")
             output = torch.nn.functional.linear(A, F.dequantize_4bit(B, quant_state).to(A.dtype).t(), bias)
 
         # 3. Save state
@@ -563,25 +564,33 @@ def matmul_4bit(
     bias: Optional[torch.Tensor] = None,
 ):
     assert quant_state is not None
+    # print("mm 4bit call: ", quant_state.__dict__)
     if A.device.type in ("cpu", "xpu") and A.requires_grad == False:
-        if getattr(quant_state, "ipex", False):
-            B = B.t() if len(B.shape) == 2 else B
-            out = F.gemv_4bit(A, B, out, state=quant_state)
-            if bias is not None:
-                out += bias
-            return out
-        else:
-            return MatMul4Bit.apply(A, B, out, bias, quant_state)
+        # Those check looks incorrect, as underneath implementation can be used, don't understand why apply called here
+        # if getattr(quant_state, "ipex", False):
+        B = B.t() if len(B.shape) == 2 else B
+        # print("no grad, calling geemv_4bit")
+        # print("dequant shape: ", F.dequantize_4bit(B, quant_state).to(A.dtype).t().shape)
+        out = F.gemv_4bit(A, B, out, state=quant_state)
+        if bias is not None:
+            out += bias
+        return out
+        # else:
+        #     print("no grad, calling MatMul4Bit.apply")
+        #     return MatMul4Bit.apply(A, B, out, bias, quant_state)
     elif A.numel() == A.shape[-1] and A.requires_grad == False and A.device.type != "npu":
         if A.shape[-1] % quant_state.blocksize != 0:
             warn(
                 f"Some matrices hidden dimension is not a multiple of {quant_state.blocksize} and efficient inference kernels are not supported for these (slow). Matrix input size found: {A.shape}",
             )
+            # print("no grad, calling MatMul4Bit.apply, some matrices not multiple of blocksize")
             return MatMul4Bit.apply(A, B, out, bias, quant_state)
         else:
+            # print("no grad, calling geemv_4bit")
             out = F.gemv_4bit(A, B.t(), out, state=quant_state)
             if bias is not None:
                 out += bias
             return out
     else:
+        # print("have grad, calling MatMul4Bit.apply")
         return MatMul4Bit.apply(A, B, out, bias, quant_state)

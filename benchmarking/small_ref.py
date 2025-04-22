@@ -10,9 +10,43 @@ from bitsandbytes.utils import QuantState
 import triton
 import triton.language as tl
 
-k = 20
 
 torch.set_printoptions(precision=5, sci_mode=False, linewidth=120, edgeitems=20, threshold=10000)
+
+def _quantile(a, q):
+    n = len(a)
+    a = sorted(a)
+
+    def get_quantile(q):
+        if not (0 <= q <= 1):
+            raise ValueError("Quantiles must be in the range [0, 1]")
+        point = q * (n - 1)
+        lower = math.floor(point)
+        upper = math.ceil(point)
+        t = point - lower
+        return (1 - t) * a[lower] + t * a[upper]
+
+    return [get_quantile(q) for q in q]
+
+
+def _summarize_statistics(times, quantiles, return_mode):
+    if quantiles is not None:
+        ret = _quantile(times, quantiles)
+        if len(ret) == 1:
+            ret = ret[0]
+        return ret
+    if return_mode == "all":
+        return times
+    elif return_mode == "min":
+        return min(times)
+    elif return_mode == "max":
+        return max(times)
+    elif return_mode == "mean":
+        return statistics.mean(times)
+    elif return_mode == "median":
+        return statistics.median(times)
+
+
 
 
 @triton.jit
@@ -70,24 +104,25 @@ def dequant_nf4_fp16(
     # A_nf4 = A_nf4.to(device=DEVICE)
     # out = out.to(device=DEVICE)
     # absmax = absmax.to(device=DEVICE)
-    if A_nf4.dtype != torch.uint8:
-        print("[Warning] Forcing conversion of {A_nf4.dtype} to uint8.")
-        bytes_value = A_nf4.cpu().numpy().tobytes()
-        A_nf4 = torch.frombuffer(bytes_value, dtype=torch.uint8).to(A_nf4.device)
+    # if A_nf4.dtype != torch.uint8:
+    #     print("[Warning] Forcing conversion of {A_nf4.dtype} to uint8.")
+    #     bytes_value = A_nf4.cpu().numpy().tobytes()
+    #     A_nf4 = torch.frombuffer(bytes_value, dtype=torch.uint8).to(A_nf4.device)
 
-    if quant_state is None:
-        assert absmax is not None and out is not None
+    # if quant_state is None:
+    #     assert absmax is not None and out is not None
 
-        quant_state = QuantState(
-            absmax=absmax,
-            shape=out.shape,
-            dtype=out.dtype,
-            blocksize=quant_blocksize,
-            quant_type=quant_type,
-        )
-    else:
-        absmax = quant_state.absmax
+    #     quant_state = QuantState(
+    #         absmax=absmax,
+    #         shape=out.shape,
+    #         dtype=out.dtype,
+    #         blocksize=quant_blocksize,
+    #         quant_type=quant_type,
+    #     )
+    # else:
+    #     absmax = quant_state.absmax
 
+    absmax = quant_state.absmax
     quant_state_code = quant_state.code.to(device=DEVICE)
 
     if quant_type not in ["nf4"]:
@@ -95,25 +130,25 @@ def dequant_nf4_fp16(
             f"4-bit quantization data type {quant_state.quant_type} is not implemented for CPU/XPU."
         )
 
-    if quant_state.nested:
-        # raise NotImplementedError("Fuck")
-        # print("Quant state nested: ", quant_state.state2)
-        absmax_orig = absmax
-        # absmax = dequant_8bit(absmax_orig, quant_state.offset, quant_state.state2)
-        # print("absmax shape out: ", absmax.shape, " absmax in shape: ", absmax_orig.shape)
-        assert quant_state.state2.quant_type == "int8"
-        assert quant_state.offset.numel() == 1
-        # absmax_out = torch.empty(absmax.shape, dtype=quant_state.state2.dtype, device=absmax.device)
-        absmax = dequant_int8_fp16(
-            absmax_orig,
-            quant_state.offset,
-            quant_state.state2,
-            quant_state.state2.absmax,
-            quant_state.state2.blocksize,
-        )
+    # if quant_state.nested:
+    #     # raise NotImplementedError("Fuck")
+    #     # print("Quant state nested: ", quant_state.state2)
+    #     absmax_orig = absmax
+    #     # absmax = dequant_8bit(absmax_orig, quant_state.offset, quant_state.state2)
+    #     # print("absmax shape out: ", absmax.shape, " absmax in shape: ", absmax_orig.shape)
+    #     assert quant_state.state2.quant_type == "int8"
+    #     assert quant_state.offset.numel() == 1
+    #     # absmax_out = torch.empty(absmax.shape, dtype=quant_state.state2.dtype, device=absmax.device)
+    #     absmax = dequant_int8_fp16(
+    #         absmax_orig,
+    #         quant_state.offset,
+    #         quant_state.state2,
+    #         quant_state.state2.absmax,
+    #         quant_state.state2.blocksize,
+    #     )
 
-    if out is None:
-        out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A_nf4.device)
+    # if out is None:
+    #     out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A_nf4.device)
 
     number_of_paired_elements = A_nf4.numel()
 
@@ -127,9 +162,9 @@ def dequant_nf4_fp16(
     )
     # print("dequant_kernel: ", (time.time() - start), "s")
 
-    if transpose:
-        print("Transposing!")
-        out = out.t()
+    # if transpose:
+    #     print("Transposing!")
+    #     out = out.t()
 
     return out
 
@@ -169,33 +204,14 @@ def dequant_4bit_kernel_2d(
     start_r = pid_m * SPLIT_ROW
     start_c = pid_n * SPLIT_COL
 
-    # offs_a_row = start_r + tl.arange(0, SPLIT_ROW)
-    # offs_a_row = tl.where(offs_a_row < R, offs_a_row, 0)
-    # offs_a_col = start_c + tl.arange(0, SPLIT_COL)
-    # offs_a_col = tl.where(offs_a_col < C, offs_a_col, 0)
-    # offs_bn = tl.where(offs_bn < N, offs_bn, 0)
-
-    # offs_a_row = tl.max_contiguous(tl.multiple_of(offs_a_row, SPLIT_ROW), SPLIT_ROW)
-    # offs_a_col = tl.max_contiguous(tl.multiple_of(offs_a_col, SPLIT_COL), SPLIT_COL)
-
     offs_a_row = (start_r + tl.arange(0, SPLIT_ROW)) % R
     offs_a_col = (start_c + tl.arange(0, SPLIT_COL)) % C
-    # a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    # b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-
-    # print("offs row: ", offs_a_row)
-    # print("offs col: ", offs_a_col)
-    # print("strides row: ", stride_a_row, " stride col: ", stride_a_col)
-    # offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, SPLIT_COL), SPLIT_COL)
-    # offs_k = tl.arange(0, BLOCK_SIZE_K)
     offsets = offs_a_row[:, None] * stride_a_row + offs_a_col[None, :] * stride_a_col
-    # print("total offsets: ", offsets)
     a_ptrs = a_ptr + offsets
 
     # a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
     a = tl.load(a_ptrs)
     a = a.to(tl.uint8, bitcast=True)
-    # print("loaded a: ", a)
 
     PAIRED_QUANT_BLOCK = QUANT_BLOCK // 2
 
@@ -204,23 +220,15 @@ def dequant_4bit_kernel_2d(
     # lower 4bits
     lower = a >> 4
 
-    # print("int4 higher: ", higher)
-    # print("int4  lower: ", lower)
-
     # apply conversion
     higher_nf4 = tl.load(quant_ptr + higher)
     lower_nf4 = tl.load(quant_ptr + lower)
-
-    # print("converted higher: ", higher_nf4)
-    # print("converted lower: ", lower_nf4)
 
     num_paired_elements = R * C * 2
     abs_blocks_lim = (
         num_paired_elements // PAIRED_QUANT_BLOCK
     ) * PAIRED_QUANT_BLOCK + num_paired_elements % PAIRED_QUANT_BLOCK
     abs_offsets = offsets // PAIRED_QUANT_BLOCK
-    # print("abs offsets: ", abs_offsets)
-    # print("abs_limit: ", abs_blocks_lim)
     mask_blocked = offsets < abs_blocks_lim
     absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked)
 
@@ -230,18 +238,11 @@ def dequant_4bit_kernel_2d(
 
     out_dq = tl.interleave(mul_low, mul_high)
 
-    # print("interleaved out: ", out_dq)
-
     out_start_c = pid_n * SPLIT_COL * 2
     offs_a_col = out_start_c + tl.arange(0, SPLIT_COL * 2)
     offs_a_col = tl.where(offs_a_col < C * 2, offs_a_col, 0)
-    # out_block_start = pid * SPLIT_SIZE * 2
     offsets = offs_a_row[:, None] * stride_a_row * 2 + offs_a_col[None, :] * stride_a_col
-    # print("out offsets: ", offsets)
-    # offs = out_block_start + tl.arange(0, SPLIT_SIZE * 2)
     mask = offsets < num_paired_elements * 2
-    # c_mask = (offs_a_row[:, None] < R) & (offs_a_col[None, :] < C * 2)
-    # tl.store(c_ptr + offs, out_dq, mask)
     tl.store(c_ptr + offsets, out_dq, mask)
 
 
@@ -258,23 +259,12 @@ def dequant2d_nf4_fp16(
     # A_nf4 = A_nf4.to(device=DEVICE)
     # out = out.to(device=DEVICE)
     # absmax = absmax.to(device=DEVICE)
-    if A_nf4.dtype != torch.uint8:
-        print("[Warning] Forcing conversion of {A_nf4.dtype} to uint8.")
-        bytes_value = A_nf4.cpu().numpy().tobytes()
-        A_nf4 = torch.frombuffer(bytes_value, dtype=torch.uint8).to(A_nf4.device)
+    # if A_nf4.dtype != torch.uint8:
+    #     print("[Warning] Forcing conversion of {A_nf4.dtype} to uint8.")
+    #     bytes_value = A_nf4.cpu().numpy().tobytes()
+    #     A_nf4 = torch.frombuffer(bytes_value, dtype=torch.uint8).to(A_nf4.device)
 
-    if quant_state is None:
-        assert absmax is not None and out is not None
-
-        quant_state = QuantState(
-            absmax=absmax,
-            shape=out.shape,
-            dtype=out.dtype,
-            blocksize=quant_blocksize,
-            quant_type=quant_type,
-        )
-    else:
-        absmax = quant_state.absmax
+    absmax = quant_state.absmax
 
     quant_state_code = quant_state.code.to(device=DEVICE)
 
@@ -282,27 +272,6 @@ def dequant2d_nf4_fp16(
         raise NotImplementedError(
             f"4-bit quantization data type {quant_state.quant_type} is not implemented for CPU/XPU."
         )
-
-    if quant_state.nested:
-        raise NotImplementedError("Fuck")
-        # print("Quant state nested: ", quant_state.state2)
-        absmax_orig = absmax
-        # absmax = dequant_8bit(absmax_orig, quant_state.offset, quant_state.state2)
-        # print("absmax shape out: ", absmax.shape, " absmax in shape: ", absmax_orig.shape)
-        assert quant_state.state2.quant_type == "int8"
-        assert quant_state.offset.numel() == 1
-        absmax_out = torch.empty(absmax.shape, dtype=quant_state.state2.dtype, device=absmax.device)
-        absmax = dequant_int8_fp16(
-            absmax_orig,
-            quant_state.offset,
-            quant_state.state2,
-            quant_state.state2.absmax,
-            absmax_out,
-            quant_state.state2.blocksize,
-        )
-
-    if out is None:
-        out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A_nf4.device)
 
     number_of_paired_elements = A_nf4.numel()
     SPLIT_ROW = 64
@@ -340,9 +309,9 @@ def dequant2d_nf4_fp16(
         num_stages=3,
     )
 
-    if transpose:
-        print("Transposing!")
-        out = out.t()
+    # if transpose:
+    #     print("Transposing!")
+    #     out = out.t()
 
     return out
 
@@ -411,41 +380,6 @@ def sum(a: torch.Tensor, b: torch.Tensor):
 
 
 torch.manual_seed(0)
-
-
-def _quantile(a, q):
-    n = len(a)
-    a = sorted(a)
-
-    def get_quantile(q):
-        if not (0 <= q <= 1):
-            raise ValueError("Quantiles must be in the range [0, 1]")
-        point = q * (n - 1)
-        lower = math.floor(point)
-        upper = math.ceil(point)
-        t = point - lower
-        return (1 - t) * a[lower] + t * a[upper]
-
-    return [get_quantile(q) for q in q]
-
-
-def _summarize_statistics(times, quantiles, return_mode):
-    if quantiles is not None:
-        ret = _quantile(times, quantiles)
-        if len(ret) == 1:
-            ret = ret[0]
-        return ret
-    if return_mode == "all":
-        return times
-    elif return_mode == "min":
-        return min(times)
-    elif return_mode == "max":
-        return max(times)
-    elif return_mode == "mean":
-        return statistics.mean(times)
-    elif return_mode == "median":
-        return statistics.median(times)
-
 
 def mm4_ref(batch=1, seq=1, model=1024, hidden=1024):
     # TORCH_COMPILE_DEBUG = 1
