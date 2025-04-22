@@ -388,6 +388,7 @@ def dequant_nf4_fp16(
 
     return out
 
+
 @torch.compile
 def comp_dequantize_nf4(
     a: torch.Tensor,
@@ -422,6 +423,7 @@ def comp_dequantize_nf4(
         out = (out_dq.view(-1, blocksize) * absmax.view(-1, 1)).reshape(out.shape).to(out.dtype)
     return out
 
+
 @torch.compile
 def comp_dequant_int8_fp16(
     A_nf4: torch.Tensor,
@@ -445,6 +447,7 @@ def comp_dequant_int8_fp16(
     absmax = absmax.reshape(A_nf4.shape)
     absmax += bias
     return absmax
+
 
 @torch.compile
 def comp_dequantize_4bit(
@@ -484,7 +487,9 @@ def comp_dequantize_4bit(
         )
 
     if quant_state.nested:
-        absmax = comp_dequant_int8_fp16(absmax, quant_state.offset, quant_state.state2, quant_state.state2.absmax, quant_state.state2.blocksize)
+        absmax = comp_dequant_int8_fp16(
+            absmax, quant_state.offset, quant_state.state2, quant_state.state2.absmax, quant_state.state2.blocksize
+        )
 
     if out is None:
         out = torch.empty(quant_state.shape, dtype=quant_state.dtype, device=A.device)
@@ -497,6 +502,7 @@ def comp_dequantize_4bit(
         out = out.t()
 
     return out
+
 
 @torch.compile
 def compiled_nf4_gemm(

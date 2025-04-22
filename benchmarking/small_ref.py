@@ -10,8 +10,8 @@ from bitsandbytes.utils import QuantState
 import triton
 import triton.language as tl
 
-
 torch.set_printoptions(precision=5, sci_mode=False, linewidth=120, edgeitems=20, threshold=10000)
+
 
 def _quantile(a, q):
     n = len(a)
@@ -45,8 +45,6 @@ def _summarize_statistics(times, quantiles, return_mode):
         return statistics.mean(times)
     elif return_mode == "median":
         return statistics.median(times)
-
-
 
 
 @triton.jit
@@ -380,6 +378,7 @@ def sum(a: torch.Tensor, b: torch.Tensor):
 
 
 torch.manual_seed(0)
+
 
 def mm4_ref(batch=1, seq=1, model=1024, hidden=1024):
     # TORCH_COMPILE_DEBUG = 1
