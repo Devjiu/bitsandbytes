@@ -92,10 +92,6 @@ def matmul_get_configs():
     ]
 
 
-@triton.autotune(
-    configs=matmul_get_configs(),
-    key=["R", "C"],
-)
 @triton.jit
 def dequant_4bit_kernel_2d(
     a_ptr,
@@ -109,24 +105,15 @@ def dequant_4bit_kernel_2d(
     QUANT_BLOCK: tl.constexpr,  #
     SPLIT_ROW: tl.constexpr,  #
     SPLIT_COL: tl.constexpr,  #
-    GROUP_SIZE_M: tl.constexpr,  #
 ):
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(R, SPLIT_ROW)
-    num_pid_n = tl.cdiv(C, SPLIT_COL)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + (pid % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
 
     start_r = pid_m * SPLIT_ROW
     start_c = pid_n * SPLIT_COL
 
     offs_a_row = (start_r + tl.arange(0, SPLIT_ROW)) % R
     offs_a_col = (start_c + tl.arange(0, SPLIT_COL)) % C
-
     offsets = offs_a_row[:, None] * stride_a_row + offs_a_col[None, :] * stride_a_col
     a_ptrs = a_ptr + offsets
 
@@ -345,36 +332,6 @@ def dequant_nf4_fp16(
     number_of_paired_elements = A_nf4.numel()
     # we assume that split_size > quant_blocksize
 
-    SPLIT_R = 16
-    SPLIT_C = 256
-    GROUP_M = 2
-    R, C = out.shape
-    # print("full tensor shape: ", out.shape)
-    C = C // 2
-
-    # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
-    # print("prev grid: ", triton.cdiv(number_of_paired_elements, 512))
-    # print("grid: ", triton.cdiv(R, SPLIT_R), " ", triton.cdiv(C, SPLIT_C))
-    grid = lambda META: (triton.cdiv(R, META["SPLIT_ROW"]) * triton.cdiv(C, META["SPLIT_COL"]),)
-    # grid = (triton.cdiv(R, SPLIT_R) * triton.cdiv(C, SPLIT_C),)
-    dequant_4bit_kernel_2d[grid](
-        A_nf4,
-        out,
-        quant_state_code,
-        absmax,
-        R,
-        C,
-        C,
-        out.stride(1),
-        quant_state.blocksize,  # SPLIT_R, SPLIT_C, GROUP_M
-    )
-
-    if transpose:
-        print("Transposing!")
-        out = out.t()
-
-    return out
-
     SPLIT_SIZE = 512
     # grid = lambda META: (triton.cdiv(number_of_paired_elements, SPLIT_SIZE), )
     grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
@@ -433,8 +390,7 @@ def comp_dequant_int8_fp16(
     quant_blocksize: int = 64,
 ):
     assert A_nf4.dtype == torch.uint8
-    DEVICE = triton.runtime.driver.active.get_active_torch_device()
-    quant_state_code = quant_state.code.to(device=DEVICE)
+    quant_state_code = quant_state.code.to(device=A_nf4.device)
 
     absmax = quant_state_code[A_nf4.reshape(-1).int()]
     # print("[ref] scaled A: ", absmax)
