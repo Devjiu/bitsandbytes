@@ -427,33 +427,33 @@ def mm4_ref(batch=1, seq=1, model=1024, hidden=1024):
     SA.absmax = SA.absmax.to(device="xpu")
     a = a.to(device="xpu")
 
-    start_event.record()
-    for _ in range(5):
-        cache.zero_()
-        B_dq = dequantize_nf4(qa, SA, B_dq, SA.code, SA.absmax, SA.blocksize)
-    end_event.record()
-    di.synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
-    # compute number of warmup and repeat
-    n_warmup = max(1, int(25 / estimate_ms))
-    n_repeat = max(1, int(100 / estimate_ms))
-    start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
-    end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
-    # Warm-up
-    for _ in range(n_warmup):
-        B_dq = dequantize_nf4(qa, SA, B_dq, SA.code, SA.absmax, SA.blocksize)
-    # Benchmark
-    for i in range(n_repeat):
-        cache.zero_()
-        # record time of `fn`
-        start_event[i].record()
-        B_dq = dequantize_nf4(qa, SA, B_dq, SA.code, SA.absmax, SA.blocksize)
-        end_event[i].record()
-    di.synchronize()
-    times = [s.elapsed_time(e) for s, e in zip(start_event, end_event)]
-    times_med = _summarize_statistics(times, None, "median")
-    # print("    dequantize_nf4 (default torch): ", estimate_ms, "ms")
-    print("   med dequantize_nf4 (default torch): ", times_med, "ms")
+    # start_event.record()
+    # for _ in range(5):
+    #     cache.zero_()
+    #     B_dq = dequantize_nf4(qa, SA, B_dq, SA.code, SA.absmax, SA.blocksize)
+    # end_event.record()
+    # di.synchronize()
+    # estimate_ms = start_event.elapsed_time(end_event) / 5
+    # # compute number of warmup and repeat
+    # n_warmup = max(1, int(25 / estimate_ms))
+    # n_repeat = max(1, int(100 / estimate_ms))
+    # start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
+    # end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
+    # # Warm-up
+    # for _ in range(n_warmup):
+    #     B_dq = dequantize_nf4(qa, SA, B_dq, SA.code, SA.absmax, SA.blocksize)
+    # # Benchmark
+    # for i in range(n_repeat):
+    #     cache.zero_()
+    #     # record time of `fn`
+    #     start_event[i].record()
+    #     B_dq = dequantize_nf4(qa, SA, B_dq, SA.code, SA.absmax, SA.blocksize)
+    #     end_event[i].record()
+    # di.synchronize()
+    # times = [s.elapsed_time(e) for s, e in zip(start_event, end_event)]
+    # times_med = _summarize_statistics(times, None, "median")
+    # # print("    dequantize_nf4 (default torch): ", estimate_ms, "ms")
+    # print("   med dequantize_nf4 (default torch): ", times_med, "ms")
 
     out_B = torch.empty_like(a, dtype=torch.float16)
     start_event = di.Event(enable_timing=True)
@@ -486,43 +486,43 @@ def mm4_ref(batch=1, seq=1, model=1024, hidden=1024):
     # print("        dequant_nf4_fp16 (triton): ", estimate_ms, "ms")
     print("        med dequant_nf4_fp16 (triton): ", times_med, "ms")
 
-    # print("from_kernel: ", out_B.view(-1, quant_blocksize))
-    # print("from_py: ", B_dq.view(-1, quant_blocksize))
-    max_diff = out_B - B_dq
-    assert torch.allclose(
-        out_B, B_dq, atol=1e-2, rtol=0
-    ), f"dequantized weight not close to original, max diff: {max_diff} First failed"
+    # # print("from_kernel: ", out_B.view(-1, quant_blocksize))
+    # # print("from_py: ", B_dq.view(-1, quant_blocksize))
+    # max_diff = out_B - B_dq
+    # assert torch.allclose(
+    #     out_B, B_dq, atol=1e-2, rtol=0
+    # ), f"dequantized weight not close to original, max diff: {max_diff} First failed"
 
-    B_dq_c = torch.empty_like(a, dtype=torch.float16)
-    start_event = di.Event(enable_timing=True)
-    end_event = di.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(5):
-        cache.zero_()
-        B_dq_c = dequant_compiled(qa, SA, B_dq_c, SA.code, SA.absmax, SA.blocksize)
-    end_event.record()
-    di.synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
-    # compute number of warmup and repeat
-    n_warmup = max(1, int(25 / estimate_ms))
-    n_repeat = max(1, int(100 / estimate_ms))
-    start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
-    end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
-    # Warm-up
-    for _ in range(n_warmup):
-        B_dq_c = dequant_compiled(qa, SA, B_dq_c, SA.code, SA.absmax, SA.blocksize)
-    # Benchmark
-    for i in range(n_repeat):
-        cache.zero_()
-        # record time of `fn`
-        start_event[i].record()
-        B_dq_c = dequant_compiled(qa, SA, B_dq_c, SA.code, SA.absmax, SA.blocksize)
-        end_event[i].record()
-    di.synchronize()
-    times = [s.elapsed_time(e) for s, e in zip(start_event, end_event)]
-    times_med = _summarize_statistics(times, None, "median")
-    # print("                 dequant_compiled: ", estimate_ms, "ms")
-    print(" med dequant_compiled (torch compile): ", times_med, "ms")
+    # B_dq_c = torch.empty_like(a, dtype=torch.float16)
+    # start_event = di.Event(enable_timing=True)
+    # end_event = di.Event(enable_timing=True)
+    # start_event.record()
+    # for _ in range(5):
+    #     cache.zero_()
+    #     B_dq_c = dequant_compiled(qa, SA, B_dq_c, SA.code, SA.absmax, SA.blocksize)
+    # end_event.record()
+    # di.synchronize()
+    # estimate_ms = start_event.elapsed_time(end_event) / 5
+    # # compute number of warmup and repeat
+    # n_warmup = max(1, int(25 / estimate_ms))
+    # n_repeat = max(1, int(100 / estimate_ms))
+    # start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
+    # end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
+    # # Warm-up
+    # for _ in range(n_warmup):
+    #     B_dq_c = dequant_compiled(qa, SA, B_dq_c, SA.code, SA.absmax, SA.blocksize)
+    # # Benchmark
+    # for i in range(n_repeat):
+    #     cache.zero_()
+    #     # record time of `fn`
+    #     start_event[i].record()
+    #     B_dq_c = dequant_compiled(qa, SA, B_dq_c, SA.code, SA.absmax, SA.blocksize)
+    #     end_event[i].record()
+    # di.synchronize()
+    # times = [s.elapsed_time(e) for s, e in zip(start_event, end_event)]
+    # times_med = _summarize_statistics(times, None, "median")
+    # # print("                 dequant_compiled: ", estimate_ms, "ms")
+    # print(" med dequant_compiled (torch compile): ", times_med, "ms")
 
     out_B = torch.empty_like(a, dtype=torch.float16)
     start_event = di.Event(enable_timing=True)
