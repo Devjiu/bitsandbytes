@@ -4,10 +4,9 @@ import statistics
 import torch
 
 from bitsandbytes import functional as F
+from bitsandbytes.backends import xpu
 import triton
 import triton.language as tl
-
-from bitsandbytes.backends import xpu
 
 torch.set_printoptions(precision=5, sci_mode=False, linewidth=120, edgeitems=20, threshold=10000)
 
@@ -269,7 +268,7 @@ def matmul_kernel(
 
     # нужно загружать гранулы и учитывать глобальный оффсет
 
-    # короче - нужно поддержать нечетный K и есть проблема _с_ остатоком от деления на block_K
+    # короче - нужно поддержать нечетный K и есть проблема остатка от деления на block_K
 
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_offsets = offs_bn[:, None] * stride_bn + offs_bk[None, :] * stride_bk
