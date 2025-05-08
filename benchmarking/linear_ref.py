@@ -7,6 +7,8 @@ from bitsandbytes import functional as F
 import triton
 import triton.language as tl
 
+from bitsandbytes.backends import xpu
+
 torch.set_printoptions(precision=5, sci_mode=False, linewidth=120, edgeitems=20, threshold=10000)
 
 
@@ -81,8 +83,6 @@ def measure_gpu(fn, *args):
     return times_med
 
 
-from bitsandbytes.backends import xpu
-
 quant_blocksize = 64
 model = 18
 hidden = 16
@@ -101,6 +101,7 @@ out = torch.empty(16, hidden, device="xpu").half()
 
 # med_tm = measure_gpu(xpu.compiled_nf4_gemm, a, qb, out, False, False, SB)
 # print("     med linear_nf4 (torch compile): ", med_tm, "ms")
+
 
 def raw_triton_dequant(A, B, state):
     #  qa, SA, SA.absmax, out_B, SA.blocksize, "nf4"
@@ -201,7 +202,7 @@ def matmul_kernel(
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    offs_bk = tl.arange(0, BLOCK_SIZE_K//2)
+    offs_bk = tl.arange(0, BLOCK_SIZE_K // 2)
     # A - [42, 300] B - [400, 300], причем по факту [60000, 1] то есть типа [400, 150] или [300, 200]
     # то есть из B нужно получить кусок типа [400, 150] деквантизовать и транспонировать
     # пусть B [4, 6]
@@ -268,10 +269,10 @@ def matmul_kernel(
 
     # нужно загружать гранулы и учитывать глобальный оффсет
 
-    # короче - нужно поддержать нечетный K и есть проблема с остатоком от деления на block_K
+    # короче - нужно поддержать нечетный K и есть проблема _с_ остатоком от деления на block_K
 
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_offsets = (offs_bn[:, None] * stride_bn + offs_bk[None, :] * stride_bk)
+    b_offsets = offs_bn[:, None] * stride_bn + offs_bk[None, :] * stride_bk
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -284,11 +285,11 @@ def matmul_kernel(
         b_ptrs = b_ptr + b_offsets
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
-        print("border: ", K//2 - k * BLOCK_SIZE_K//2)
+        print("border: ", K // 2 - k * BLOCK_SIZE_K // 2)
         print("offs bk: ", offs_bk[None, :])
-        print("mask: ", (offs_bk[None, :] < K//2 - k * BLOCK_SIZE_K//2))
+        print("mask: ", (offs_bk[None, :] < K // 2 - k * BLOCK_SIZE_K // 2))
         a = tl.load(a_ptrs, mask=((offs_k[None, :] < K - k * BLOCK_SIZE_K) & (offs_bn[:, None] < N)), other=0.0)
-        b = tl.load(b_ptrs, mask=(offs_bk[None, :] < K//2 - k * BLOCK_SIZE_K//2), other=0x77)
+        b = tl.load(b_ptrs, mask=(offs_bk[None, :] < K // 2 - k * BLOCK_SIZE_K // 2), other=0x77)
         print("loaded b: ", b)
         dq_b_t = dequant_4bit_kernel(
             b,
@@ -305,7 +306,7 @@ def matmul_kernel(
         accumulator = tl.dot(a, dq_b, accumulator)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_offsets += (BLOCK_SIZE_K//2) * stride_bk
+        b_offsets += (BLOCK_SIZE_K // 2) * stride_bk
     c = accumulator.to(tl.float16)
 
     # -----------------------------------------------------------
@@ -331,7 +332,7 @@ def matmul(a, b, state):
     #     b_padded = b_padded.view(N, K//2 + K%2)
     # b = b_padded
     # print("b shape: ", b.shape, " K + rest: ", K//2 + K%2)
-    b = b.view(N, K//2)
+    b = b.view(N, K // 2)
     b = b.to(torch.uint8)
 
     BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, GROUP_SIZE_M = 16, 16, 16, 4
