@@ -106,7 +106,7 @@ class TestInt8BlockwiseQuantOps:
 
         code = bitsandbytes.functional.create_dynamic_map().to(device)
         A = torch.randn(1024, 1024, dtype=dtype, device=device)
-        out, absmax = torch.ops.bitsandbytes.quantize_blockwise(A, code, blocksize)
+        out, absmax = torch.ops.bitsandbytes.quantize_blockwise.default(A, code, blocksize)
 
         assert out.shape == A.shape
         assert out.dtype == torch.uint8
@@ -220,6 +220,18 @@ class Test4bitBlockwiseQuantOps:
         code = bitsandbytes.functional.get_4bit_type(quant_type, device=A.device, blocksize=blocksize)
 
         out = torch.ops.bitsandbytes.gemv_4bit.default(A, B_q, B.shape, absmax, code, blocksize)
+
+        from bitsandbytes.backends.triton.ops import gemv_4bit
+
+        out_c = torch.compile(gemv_4bit)(A, B_q, B.shape, absmax, code, blocksize)
+
+        asserr = torch.allclose(out, out_c, atol=1e-2)
+        print("out:", out)
+        print("out_c:", out_c)
+        # torch.allclose(out, out_c)
+        if not asserr:
+            print("out and out_c are not close")
+            raise AssertionError("out and out_c are not close")
 
         assert out.device == A.device
         assert out.dtype == dtype

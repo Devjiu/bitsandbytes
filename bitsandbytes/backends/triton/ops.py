@@ -2,7 +2,9 @@ from collections.abc import Sequence
 
 import torch
 
-from .utils import _FP4_QUANT_TABLE, _NF4_QUANT_TABLE
+from bitsandbytes.functional import get_4bit_type
+
+_NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
 
 try:
     from . import triton_kernels
@@ -35,8 +37,8 @@ def dequantize_blockwise(
     torch._check_is_size(blocksize)
     torch._check(A.dtype == torch.uint8, lambda: f"A must be uint8, got {A.dtype}")
     # torch._check(dtype == torch.float32, lambda: f"dtype must be float32 on xpu, got {dtype}")
-
     out = torch.empty_like(A, dtype=dtype, device=A.device)
+
     triton_kernels.dequant_int8_blockwise(
         A,
         code,
@@ -87,9 +89,10 @@ def quantize_4bit(
     out = torch.empty((n // 2, 1), device=A.device, dtype=torch.uint8)
 
     if quant_type == "fp4":
-        triton_kernels.quantize_4bit_blockwise_triton(A, blocksize, _FP4_QUANT_TABLE, blocks, absmax, out)
+        triton_kernels.quantize_fp4_blockwise_triton(A, blocksize, blocks, absmax, out)
     else:
-        triton_kernels.quantize_4bit_blockwise_triton(A, blocksize, _NF4_QUANT_TABLE, blocks, absmax, out)
+        triton_kernels.quantize_nf4_blockwise_triton(A, blocksize, blocks, absmax, out)
+        # triton_kernels.quantize_nf4_blockwise_triton(A, blocksize, _NF4_QUANT_TABLE, blocks, absmax, out)
     packed = out
 
     if quant_storage != torch.uint8:
@@ -112,14 +115,10 @@ def dequantize_4bit(
         dtype in [torch.bfloat16, torch.float16, torch.float32],
         lambda: f"Blockwise 4bit dequantization only supports 16/32-bit floats, but got {dtype}",
     )
-    # torch._check(
-    #     A.dtype == torch.uint8,
-    #     lambda: f"Blockwise 4bit dequantization on XPU only supports uint8 storage, got {A.dtype}",
-    # )
     # Check if this is fine and fast
     if A.dtype != torch.uint8:
         A = A.squeeze().view(torch.uint8).unsqueeze(1)
-
+    # print("A.dtype", A.dtype, " dtype: ", dtype)
     out = torch.empty(shape, dtype=dtype, device=A.device)
 
     triton_kernels._dequantize_4bit_impl(A, absmax, blocksize, quant_type, dtype, out=out)
@@ -148,19 +147,10 @@ def gemv_4bit(
     code: torch.Tensor,
     blocksize: int,
 ) -> torch.Tensor:
-    # TODO: We need to determine whether `code` is NF4, FP4, or other.
-    # Right now we assume NF4, as this is the only one supported on CPU.
-    quant_type = "fp4" if code[1] > 0 else "nf4"
-    B_dq = dequantize_4bit(B, absmax, blocksize, quant_type, shapeB, A.dtype)
+    if B.dtype != torch.uint8:
+        B = B.squeeze().view(torch.uint8).unsqueeze(1)
 
-    # For some reason directly passing code causes errors in some cases like:
-    # tests/test_functional.py::TestQuantize4BitFunctional::test_gemv_4bit[dim=128-uint8-fp32-fc1-fp4-DQ_True-xpu]
-    #
     # B_dq = torch.empty(shapeB, dtype=A.dtype, device=A.device)
-    # code = code.to(A.device)
-    # if B.dtype != torch.uint8:
-    #     B = B.squeeze().view(torch.uint8).unsqueeze(1)
-
     # triton_kernels._dequantize_4bit_impl_passing_code(
     #     B,
     #     absmax,
@@ -169,13 +159,26 @@ def gemv_4bit(
     #     dtype=A.dtype,
     #     out=B_dq,
     # )
+    quant_type = "fp4" if code[1] > 0 else "nf4"
+    B_dq_triton = dequantize_4bit(B, absmax, blocksize, quant_type, shapeB, A.dtype)
 
-    # User called gemv with B.t(), so we need to transpose it back.
-    # if B.shape[0] == 1:
-    #    B_dq = B_dq.t()
+    # For some reason directly passing code causes errors in some cases like:
+    # tests/test_functional.py::TestQuantize4BitFunctional::test_gemv_4bit[dim=128-uint8-fp32-fc1-fp4-DQ_True-xpu]
+    #
+    # B_dq_triton = torch.empty(shapeB, dtype=A.dtype, device=A.device)
+
+    # triton_kernels._dequantize_4bit_impl_passing_code(
+    #     B,
+    #     absmax,
+    #     blocksize,
+    #     code,
+    #     dtype=A.dtype,
+    #     out=B_dq_triton,
+    # )
 
     return torch.nn.functional.linear(
         A,
-        B_dq,
+        B_dq_triton,
         bias=None,
     )
+    # return c_mm_ref
