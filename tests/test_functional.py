@@ -1215,7 +1215,7 @@ class TestQuantize4BitFunctional:
         [torch.uint8, torch.float16, torch.bfloat16, torch.float32],
         ids=describe_dtype,
     )
-    @pytest.mark.parametrize("dim", [128, 256, 512, 1024], ids=id_formatter("dim"))
+    @pytest.mark.parametrize("dim", [128, 256, 512, 1024, 4096], ids=id_formatter("dim"))
     def test_gemv_4bit(self, device, dim, dtype, storage_type, quant_storage, double_quant, kind):
         if device == "cpu":
             if storage_type != "nf4":

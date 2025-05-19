@@ -212,7 +212,7 @@ class Test4bitBlockwiseQuantOps:
             pytest.xfail("CPU implementation is not available")
 
         out_features = 1024
-        in_features = 256
+        in_features = 4096
 
         A = torch.randn((1, 1, in_features), dtype=dtype, device=device)
         B = torch.randn((out_features, in_features), dtype=dtype, device=A.device)

@@ -70,8 +70,8 @@ def dequantize_blockwise(
     torch._check_is_size(blocksize)
     torch._check(A.dtype == torch.uint8, lambda: f"A must be uint8, got {A.dtype}")
     # torch._check(dtype == torch.float32, lambda: f"dtype must be float32 on xpu, got {dtype}")
-
     out = torch.empty_like(A, dtype=dtype, device=A.device)
+
     triton_kernels.dequant_int8_blockwise(
         A,
         code,
