@@ -1101,6 +1101,64 @@ class TestSparseTensorFunctional:
         torch.testing.assert_close(A2.t()[idx], cscA.values)
 
 
+def dquantize_fp4(x: torch.Tensor) -> torch.Tensor:
+    # x: tensor of floats (любого shape)
+    sign = torch.where(x < 0, 0b1000, 0)
+    x_abs = x.abs()
+
+    # Вложенная логика через torch.where
+    cond1 = x_abs > 0.29166667
+    cond2 = x_abs > 0.583333
+    cond3 = x_abs > 0.8333333
+    cond4 = x_abs > 0.4166667
+    cond5 = x_abs > 0.0859375
+    cond6 = x_abs > 0.20833333
+    cond7 = x_abs > 0.00260417
+
+    # Ветка x_abs > 0.29166667
+    branch1 = torch.where(
+        cond2,
+        torch.where(cond3, torch.full_like(x, 0b0011), torch.full_like(x, 0b0010)),
+        torch.where(cond4, torch.full_like(x, 0b101), torch.full_like(x, 0b100))
+    )
+    # Ветка x_abs <= 0.29166667
+    branch2 = torch.where(
+        cond5,
+        torch.where(cond6, torch.full_like(x, 0b0111), torch.full_like(x, 0b0110)),
+        torch.where(cond7, torch.full_like(x, 0b0001), torch.full_like(x, 0b0000))
+    )
+    result = torch.where(cond1, branch1, branch2)
+    return (result + sign).to(torch.uint8)
+
+
+def print_tensor_bin(tensor):
+    arr = tensor.flatten().cpu().numpy()
+    for i in range(0, len(arr), 4):
+        line = "  ".join(f"{int(v):08b}" for v in arr[i:i+4])
+        print(line)
+
+
+def quantize_4bit_torch(
+    A: torch.Tensor, blocksize: int, quant_type: str, quant_storage: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Divide into blocks and normalize
+    blocks = A.reshape(-1, blocksize)
+    absmax = blocks.abs().max(dim=1).values.float()
+    scaled = blocks / absmax.unsqueeze(-1)
+    # quantized = dquantize_fp4(scaled)
+    print("\nref quantized even: ", dquantize_fp4(scaled[::2]))
+    print("\nref quantized even bin format: ",print_tensor_bin(dquantize_fp4(scaled[::2])))
+    print("\nref quantized  odd: ", dquantize_fp4(scaled[1::2]))
+    print("\nref quantized  odd bin format: ",print_tensor_bin(dquantize_fp4(scaled[1::2])))
+    # quantized = torch.argmin(torch.abs(scaled.view(-1, 1) - _FP4_QUANT_TABLE), dim=-1, keepdim=True).to(
+    #     torch.uint8
+    # )
+    packed = dquantize_fp4(scaled[::2]) << 4 | dquantize_fp4(scaled[1::2])
+    if quant_storage != torch.uint8:
+        packed = packed.squeeze().view(quant_storage).unsqueeze(1)
+    return packed, absmax.float()
+
+
 class TestQuantize4BitFunctional:
     @pytest.mark.parametrize("device", get_available_devices())
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=describe_dtype)
@@ -1235,7 +1293,7 @@ class TestQuantize4BitFunctional:
 
         # Large number of iterations is excessive and slow on CPU.
         # Keep for CUDA for now.
-        iters = 100 if device == "cuda" else 10
+        iters = 100 if device == "cuda" else 100
 
         for i in range(iters):
             if kind == "fc1":

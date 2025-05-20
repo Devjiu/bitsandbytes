@@ -106,7 +106,7 @@ class TestInt8BlockwiseQuantOps:
 
         code = bitsandbytes.functional.create_dynamic_map().to(device)
         A = torch.randn(1024, 1024, dtype=dtype, device=device)
-        out, absmax = torch.ops.bitsandbytes.quantize_blockwise(A, code, blocksize)
+        out, absmax = torch.ops.bitsandbytes.quantize_blockwise.default(A, code, blocksize)
 
         assert out.shape == A.shape
         assert out.dtype == torch.uint8
