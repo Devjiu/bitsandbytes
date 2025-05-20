@@ -50,33 +50,34 @@ def print_tensor_bin(tensor):
         print(line)
 
 @torch.compile
-def quantize_4bit_torch(
-    A: torch.Tensor, blocksize: int, quant_type: str, quant_storage: torch.dtype
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # Divide into blocks and normalize
-    blocks = A.reshape(-1, blocksize)
-    absmax = blocks.abs().max(dim=1).values.float()
-    scaled = blocks / absmax.unsqueeze(-1)
-    if quant_type == "fp4":
-        quantized = torch.argmin(torch.abs(scaled.view(-1, 1) - _FP4_QUANT_TABLE), dim=-1, keepdim=True).to(
-            torch.uint8
-        )
-    else:
-        quantized = torch.argmin(torch.abs(scaled.view(-1, 1) - _NF4_QUANT_TABLE), dim=-1, keepdim=True).to(
-            torch.uint8
-        )
-    # print("\ntorch quantized all: ", quantized.flatten())
-    # print("\ntorch quantized even: ", quantized[::2].flatten())
-    # print("\ntorch quantized even bin format: ", print_tensor_bin(quantized[::2]))
-    # print("\ntorch quantized  odd: ", quantized[1::2].flatten())
-    # print("\ntorch quantized  odd bin format: ", print_tensor_bin(quantized[1::2]))
-    packed = quantized[::2] << 4 | quantized[1::2]
-    if quant_storage != torch.uint8:
-        packed = packed.squeeze().view(quant_storage).unsqueeze(1)
-    return packed, absmax.float()
+def quantize_blockwise_torch(A, code, blocksize):
+    n = A.numel()
+    blocks = -(n // -blocksize)
+
+    absmax = torch.empty((blocks,), device=A.device, dtype=A.dtype)
+    quantized_out = torch.empty_like(A.flatten(), dtype=torch.uint8)
+
+    rem = n % blocksize
+    has_rem = rem > 0
+    blocks = n // blocksize + has_rem
+    A_reshaped = A.reshape(n)
+    A_com = A_reshaped[: n - rem]
+    A_com_reshaped = A_com.reshape(n // blocksize, blocksize)
+    absmax[: blocks - has_rem] = torch.abs(A_com_reshaped).max(dim=-1)[0]
+    scaled_A = torch.clamp(A_com_reshaped / absmax[: blocks - has_rem].view(-1, 1), -1, 1)
+    scaled_A = scaled_A.reshape(-1)
+    if has_rem:
+        absmax[-1] = torch.abs(A_reshaped[n - rem :]).max()
+        scaled_A_rem = torch.clamp((A_reshaped[n - rem :] / absmax[-1]), -1, 1)
+        scaled_A = torch.cat([scaled_A, scaled_A_rem], dim=0)
+
+    diff = torch.abs(scaled_A.unsqueeze(-1) - code.to(scaled_A.device))
+    quantized_out = torch.argmin(diff, dim=-1).to(torch.uint8).to(scaled_A.device).reshape(A.shape)
+    return quantized_out, absmax
 
 if triton_available:
     register_kernel("bitsandbytes::quantize_blockwise", "xpu")(triton_ops.quantize_blockwise)
+    # register_kernel("bitsandbytes::quantize_blockwise", "xpu")(quantize_blockwise_torch)
     register_kernel("bitsandbytes::dequantize_blockwise.out", "xpu")(triton_ops.dequantize_blockwise_inplace)
     register_kernel("bitsandbytes::dequantize_blockwise", "xpu")(triton_ops.dequantize_blockwise)
     register_kernel("bitsandbytes::quantize_4bit", "xpu")(triton_ops.quantize_4bit)
