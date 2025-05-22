@@ -6,6 +6,35 @@ import triton.language as tl
 
 # Should be the same for quant/dequant
 _FP4_QUANT_TABLE = get_4bit_type("fp4", device="xpu")
+# print("fp4 quant table", _FP4_QUANT_TABLE)
+# _FP4_QUANT_TABLE = torch.tensor([ 0.0000,  0.0052,  0.6667,  1.0000,  0.3333,  0.5000,  0.1667,  0.2500,
+#          0.0000, -0.0052, -0.6667, -1.0000, -0.3333, -0.5000, -0.1667, -0.2500],
+#     dtype=torch.float32,
+#     device="xpu",
+# )
+# _NF4_QUANT_TABLE = torch.tensor(
+#     [
+#         -1.0,
+#         -0.6961928009986877,
+#         -0.5250730514526367,
+#         -0.39491748809814453,
+#         -0.28444138169288635,
+#         -0.18477343022823334,
+#         -0.09105003625154495,
+#         0.0,
+#         0.07958029955625534,
+#         0.16093020141124725,
+#         0.24611230194568634,
+#         0.33791524171829224,
+#         0.44070982933044434,
+#         0.5626170039176941,
+#         0.7229568362236023,
+#         1.0,
+#     ],
+#     dtype=torch.float32,
+#     device="xpu",
+# )
+
 _NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
 
 
@@ -689,14 +718,14 @@ def dequant_4bit_kernel(
     lower = a >> 4
     # print("lower: ", lower)
 
-    # abs_blocks_lim = (
-    #     num_paired_elements // PAIRED_QUANT_BLOCK
-    # ) * PAIRED_QUANT_BLOCK + num_paired_elements % PAIRED_QUANT_BLOCK
-    # abs_offsets = offsets // PAIRED_QUANT_BLOCK
-    # mask_blocked = offsets < abs_blocks_lim
-    # absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked, eviction_policy='evict_last')
+    abs_blocks_lim = (
+        num_paired_elements // PAIRED_QUANT_BLOCK
+    ) * PAIRED_QUANT_BLOCK + num_paired_elements % PAIRED_QUANT_BLOCK
     abs_offsets = offsets // PAIRED_QUANT_BLOCK
-    absmax = tl.load(absmax_ptr + abs_offsets, mask=mask, other=1.0, eviction_policy="evict_last")
+    mask_blocked = offsets < abs_blocks_lim
+    absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked, eviction_policy='evict_last')
+    # abs_offsets = offsets // PAIRED_QUANT_BLOCK
+    # absmax = tl.load(absmax_ptr + abs_offsets, mask=mask, other=1.0, eviction_policy="evict_last")
 
     # out_block_start = pid * SPLIT_SIZE * 2
     # offs_low = out_block_start + 2 * tl.arange(0, SPLIT_SIZE)

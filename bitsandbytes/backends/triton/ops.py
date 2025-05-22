@@ -119,7 +119,7 @@ def dequantize_4bit(
     # Check if this is fine and fast
     if A.dtype != torch.uint8:
         A = A.squeeze().view(torch.uint8).unsqueeze(1)
-
+    # print("A.dtype", A.dtype, " dtype: ", dtype)
     out = torch.empty(shape, dtype=dtype, device=A.device)
 
     triton_kernels._dequantize_4bit_impl(A, absmax, blocksize, quant_type, dtype, out=out)
@@ -160,22 +160,22 @@ def gemv_4bit(
     #     dtype=A.dtype,
     #     out=B_dq,
     # )
-    # quant_type = "fp4" if code[1] > 0 else "nf4"
-    # B_dq = dequantize_4bit(B, absmax, blocksize, quant_type, shapeB, A.dtype)
+    quant_type = "fp4" if code[1] > 0 else "nf4"
+    B_dq_triton = dequantize_4bit(B, absmax, blocksize, quant_type, shapeB, A.dtype)
 
     # For some reason directly passing code causes errors in some cases like:
     # tests/test_functional.py::TestQuantize4BitFunctional::test_gemv_4bit[dim=128-uint8-fp32-fc1-fp4-DQ_True-xpu]
     #
-    B_dq_triton = torch.empty(shapeB, dtype=A.dtype, device=A.device)
+    # B_dq_triton = torch.empty(shapeB, dtype=A.dtype, device=A.device)
 
-    triton_kernels._dequantize_4bit_impl_passing_code(
-        B,
-        absmax,
-        blocksize,
-        code,
-        dtype=A.dtype,
-        out=B_dq_triton,
-    )
+    # triton_kernels._dequantize_4bit_impl_passing_code(
+    #     B,
+    #     absmax,
+    #     blocksize,
+    #     code,
+    #     dtype=A.dtype,
+    #     out=B_dq_triton,
+    # )
 
     return torch.nn.functional.linear(
         A,

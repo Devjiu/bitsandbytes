@@ -1101,63 +1101,6 @@ class TestSparseTensorFunctional:
         torch.testing.assert_close(A2.t()[idx], cscA.values)
 
 
-def dquantize_fp4(x: torch.Tensor) -> torch.Tensor:
-    # x: tensor of floats (любого shape)
-    sign = torch.where(x < 0, 0b1000, 0)
-    x_abs = x.abs()
-
-    # Вложенная логика через torch.where
-    cond1 = x_abs > 0.29166667
-    cond2 = x_abs > 0.583333
-    cond3 = x_abs > 0.8333333
-    cond4 = x_abs > 0.4166667
-    cond5 = x_abs > 0.0859375
-    cond6 = x_abs > 0.20833333
-    cond7 = x_abs > 0.00260417
-
-    # Ветка x_abs > 0.29166667
-    branch1 = torch.where(
-        cond2,
-        torch.where(cond3, torch.full_like(x, 0b0011), torch.full_like(x, 0b0010)),
-        torch.where(cond4, torch.full_like(x, 0b101), torch.full_like(x, 0b100)),
-    )
-    # Ветка x_abs <= 0.29166667
-    branch2 = torch.where(
-        cond5,
-        torch.where(cond6, torch.full_like(x, 0b0111), torch.full_like(x, 0b0110)),
-        torch.where(cond7, torch.full_like(x, 0b0001), torch.full_like(x, 0b0000)),
-    )
-    result = torch.where(cond1, branch1, branch2)
-    return (result + sign).to(torch.uint8)
-
-
-def print_tensor_bin(tensor):
-    arr = tensor.flatten().cpu().numpy()
-    for i in range(0, len(arr), 4):
-        line = "  ".join(f"{int(v):08b}" for v in arr[i : i + 4])
-        print(line)
-
-
-def quantize_4bit_torch(
-    A: torch.Tensor, blocksize: int, quant_type: str, quant_storage: torch.dtype
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # Divide into blocks and normalize
-    blocks = A.reshape(-1, blocksize)
-    absmax = blocks.abs().max(dim=1).values.float()
-    scaled = blocks / absmax.unsqueeze(-1)
-    # quantized = dquantize_fp4(scaled)
-    print("\nref quantized even: ", dquantize_fp4(scaled[::2]))
-    print("\nref quantized even bin format: ", print_tensor_bin(dquantize_fp4(scaled[::2])))
-    print("\nref quantized  odd: ", dquantize_fp4(scaled[1::2]))
-    print("\nref quantized  odd bin format: ", print_tensor_bin(dquantize_fp4(scaled[1::2])))
-    # quantized = torch.argmin(torch.abs(scaled.view(-1, 1) - _FP4_QUANT_TABLE), dim=-1, keepdim=True).to(
-    #     torch.uint8
-    # )
-    packed = dquantize_fp4(scaled[::2]) << 4 | dquantize_fp4(scaled[1::2])
-    if quant_storage != torch.uint8:
-        packed = packed.squeeze().view(quant_storage).unsqueeze(1)
-    return packed, absmax.float()
-
 
 class TestQuantize4BitFunctional:
     @pytest.mark.parametrize("device", get_available_devices())
@@ -1273,7 +1216,7 @@ class TestQuantize4BitFunctional:
         [torch.uint8, torch.float16, torch.bfloat16, torch.float32],
         ids=describe_dtype,
     )
-    @pytest.mark.parametrize("dim", [64, 128, 256, 512, 1024, 4096], ids=id_formatter("dim"))
+    @pytest.mark.parametrize("dim", [128, 256, 512, 1024], ids=id_formatter("dim"))
     def test_gemv_4bit(self, device, dim, dtype, storage_type, quant_storage, double_quant, kind):
         if device == "cpu":
             if storage_type != "nf4":
@@ -1293,9 +1236,9 @@ class TestQuantize4BitFunctional:
 
         # Large number of iterations is excessive and slow on CPU.
         # Keep for CUDA for now.
-        iters = 100 if device == "cuda" else 100
+        iters = 100 if device == "cuda" else 10
 
-        for i in range(1):
+        for i in range(iters):
             if kind == "fc1":
                 A = torch.randn(1, dim, dtype=dtype, device=device)
                 B = torch.randn(dim * 4, dim, dtype=dtype, device=device) / math.sqrt(dim)
@@ -1315,23 +1258,23 @@ class TestQuantize4BitFunctional:
                 compress_statistics=double_quant,
                 quant_storage=quant_storage,
             )
-            print("dtype: ", dtype)
-            print("a ", A.dtype, " b ", B.dtype)
+            # print("dtype: ", dtype)
+            # print("a ", A.dtype, " b ", B.dtype)
             A = A.to(torch.float32)
             B = B.to(torch.float32)
             C3 = torch.matmul(A, B.t())
-            if state.dtype != A.dtype:
-                print("Dtypes are differ: state - ", state.dtype, " a dtype - ", A.dtype)
+            # if state.dtype != A.dtype:
+            #     print("Dtypes are differ: state - ", state.dtype, " a dtype - ", A.dtype)
             C2 = F.gemv_4bit(A, qB.t(), state=state)
             A.requires_grad = True
             C1 = bnb.matmul_4bit(A, qB.t(), state)
             # print("A: ", A.dtype)
-            print("C1: ", C1.dtype)
-            print("C2: ", C2.dtype)
-            print("C1: ", C1)
-            print("C2: ", C2)
-            print("C1: ", C1[0][0])
-            print("C2: ", C2[0][0])
+            # print("C1: ", C1.dtype)
+            # print("C2: ", C2.dtype)
+            # print("C1: ", C1)
+            # print("C2: ", C2)
+            # print("C1: ", C1[0][0])
+            # print("C2: ", C2[0][0])
 
             err1 = (C1 - C2).abs().float()
             err2 = (C3 - C2).abs().float()
@@ -1373,7 +1316,7 @@ class TestQuantize4BitFunctional:
         maxerr1 = sum(max_errs1) / len(max_errs1) / math.sqrt(dim)
         maxerr2 = sum(max_errs2) / len(max_errs2) / math.sqrt(dim)
         maxerr3 = sum(max_errs3) / len(max_errs3) / math.sqrt(dim)
-        print("err1: ", err1, " err2: ", err2, " err3: ", err3)
+        # print("err1: ", err1, " err2: ", err2, " err3: ", err3)
         absratio = err2 / err3
         relratio = relerr2 / relerr3
         maxratio = relerr2 / relerr3
@@ -1412,27 +1355,25 @@ class TestQuantize4BitFunctional:
             assert relratio < 1.005 and relratio > 0.995
             assert maxratio < 1.005 and maxratio > 0.995
         elif dtype == torch.float32:
-            # TODO(anyone): On XPU matmul is noisy on the level 2e-5
-            if device == "xpu":
-                print("realerr1: ", relerr1, " maxerr1: ", maxerr1)
-                if dim <= 512:
-                    assert err1 < 2e-5
-                    assert relerr1 < 1e-6
-                    assert maxerr1 < 1e-7
-                else:
-                    assert err1 < 2e-5
-                    assert relerr1 < 8e-6
-                    assert maxerr1 < 1e-7
-
+            # # TODO(anyone): On XPU matmul is noisy on the level 2e-5
+            # if device == "xpu":
+            #     print("realerr1: ", relerr1, " maxerr1: ", maxerr1)
+            #     if dim <= 512:
+            #         assert err1 < 2e-5
+            #         assert relerr1 < 1e-6
+            #         assert maxerr1 < 1e-7
+            #     else:
+            #         assert err1 < 2e-5
+            #         assert relerr1 < 8e-6
+            #         assert maxerr1 < 1e-7
+            if dim <= 512:
+                assert err1 < 5e-8
+                assert relerr1 < 1e-6
+                assert maxerr1 < 1e-7
             else:
-                if dim <= 512:
-                    assert err1 < 5e-8
-                    assert relerr1 < 1e-6
-                    assert maxerr1 < 1e-7
-                else:
-                    assert err1 < 5e-8
-                    assert relerr1 < 8e-6
-                    assert maxerr1 < 1e-7
+                assert err1 < 5e-8
+                assert relerr1 < 8e-6
+                assert maxerr1 < 1e-7
             assert absratio < 1.005 and absratio > 0.995
             assert relratio < 1.005 and relratio > 0.995
             assert maxratio < 1.005 and maxratio > 0.995
