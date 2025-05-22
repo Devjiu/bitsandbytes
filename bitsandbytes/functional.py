@@ -1728,9 +1728,11 @@ def gemv_4bit(
 
     absmax = state.absmax
     if state.nested:
+        # print("calling neested/ aka blockwise")
         absmax = dequantize_blockwise(absmax, state.state2) + state.offset
 
     if out is not None:
+        # print("calling gemv inplace")
         torch.ops.bitsandbytes.gemv_4bit.out(
             A,
             B,
@@ -1741,7 +1743,7 @@ def gemv_4bit(
             out=out,
         )
         return out
-
+    # print("calling gemv default")
     return torch.ops.bitsandbytes.gemv_4bit.default(
         A,
         B,

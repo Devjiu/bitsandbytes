@@ -2,7 +2,7 @@ from collections.abc import Sequence
 
 import torch
 
-from bitsandbytes.functional import get_4bit_type # , _FP4_QUANT_TABLE, _NF4_QUANT_TABLE
+from bitsandbytes.functional import get_4bit_type
 
 _NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
 
@@ -21,13 +21,13 @@ def quantize_blockwise(A: torch.Tensor, code: torch.Tensor, blocksize: int) -> t
     n = A.numel()
     blocks = -(n // -blocksize)
 
-    absmax = torch.empty((blocks,), device=A.device, dtype=torch.float32)
+    absmax = torch.empty((blocks,), device=A.device, dtype=A.dtype)
     out = torch.empty_like(A.flatten(), dtype=torch.uint8)
 
     triton_kernels.quantize_blockwise_triton(A, blocksize, code, blocks, absmax, out)
     out = out.reshape(A.shape)
 
-    return out, absmax
+    return out, absmax.float()
 
 
 def dequantize_blockwise(
@@ -147,32 +147,107 @@ def gemv_4bit(
     code: torch.Tensor,
     blocksize: int,
 ) -> torch.Tensor:
+    if B.dtype != torch.uint8:
+        B = B.squeeze().view(torch.uint8).unsqueeze(1)
+
+    # B_dq = torch.empty(shapeB, dtype=A.dtype, device=A.device)
+    # triton_kernels._dequantize_4bit_impl_passing_code(
+    #     B,
+    #     absmax,
+    #     blocksize,
+    #     code,
+    #     dtype=A.dtype,
+    #     out=B_dq,
+    # )
+    # print("B_dq: ", B_dq.shape)
+    # print("B_dq: ", B_dq)
+    return triton_kernels.matmul(A, B, shapeB, code, absmax, blocksize)
     # quant_type = "fp4" if code[1] > 0 else "nf4"
     # B_dq = dequantize_4bit(B, absmax, blocksize, quant_type, shapeB, A.dtype)
 
     # For some reason directly passing code causes errors in some cases like:
     # tests/test_functional.py::TestQuantize4BitFunctional::test_gemv_4bit[dim=128-uint8-fp32-fc1-fp4-DQ_True-xpu]
     #
-    B_dq = torch.empty(shapeB, dtype=A.dtype, device=A.device)
+    B_dq_triton = torch.empty(shapeB, dtype=A.dtype, device=A.device)
+    # B_dq = B_dq * 7
     # code = code.to(A.device).sort().values
-    if B.dtype != torch.uint8:
-        B = B.squeeze().view(torch.uint8).unsqueeze(1)
+    # if B.dtype != torch.uint8:
+    #     B = B.squeeze().view(torch.uint8).unsqueeze(1)
 
-    triton_kernels._dequantize_4bit_impl_passing_code(
-        B,
+    # triton_kernels._dequantize_4bit_impl_passing_code(
+    #     B,
+    #     absmax,
+    #     blocksize,
+    #     code,
+    #     dtype=A.dtype,
+    #     out=B_dq_triton,
+    # )
+
+    B_dq = triton_kernels.dequant_4bit_blockwise(B,
         absmax,
         blocksize,
         code,
         dtype=A.dtype,
-        out=B_dq,
+        shape=shapeB,
     )
+    # print("allclose: ", torch.allclose(B_dq_triton, B_dq))
+    # print("absmax diff: ", torch.max((B_dq_triton - B_dq).abs()))
 
     # User called gemv with B.t(), so we need to transpose it back.
     # if B.shape[0] == 1:
     #    B_dq = B_dq.t()
+    # A = A.to(torch.float32)
+    # B_pass = B_dq.to(torch.float32)
+    # c_ref = torch.matmul(
+    #     A,
+    #     B_dq.T,
+    # )
+    # print("c_ref: ", c_ref.dtype)
+    # print("c_ref: ", c_ref.shape)
 
-    return torch.nn.functional.linear(
+    # print("B_d before passing to triton: ", B_pass.shape)
+    # print("B_d before passing to triton: ", B_pass)
+    # print("A: ", A)
+    # print("c_ref: ", c_ref)
+    print("B_dq shape: ", B_dq.shape)
+    # c = triton_kernels.simple_mm(
+    #     A.to(torch.float32),
+    #     B_dq.T.to(torch.float32),
+    #     A.dtype,
+    #     A.dtype,
+    # )
+
+    # ones = torch.eye(c.shape[1], c.shape[1], device=c.device, dtype=c.dtype)
+    # c = torch.matmul(c, ones)
+    # import pdb
+    # pdb.set_trace()
+    # print(" c: ", c[0][0])
+    # c = c.to(A.dtype)
+    # torch.set_float32_matmul_precision("high")
+    # c_mm_ref = torch.matmul(A, B_dq_triton.T)
+    # print("diff: ", c_mm_ref - c)
+    # print("c: ", c)
+    # print("c_ref == c: ", c_ref - c)
+
+    # errs1 = (c - c_ref).abs().float()
+    # errs1.append(err1.mean().item())
+    # err1 = sum(errs1) / len(errs1) / math.sqrt(dim)
+    # torch.set_float32_matmul_precision("highest")
+    out_mm_tri = torch.nn.functional.linear(
         A,
         B_dq,
         bias=None,
     )
+
+    out_mm_torch = torch.nn.functional.linear(
+        A,
+        B_dq,
+        bias=None,
+    )
+    print("out allclose: ", torch.allclose(out_mm_torch, out_mm_tri))
+    print("out absmax diff: ", torch.max((out_mm_torch - out_mm_tri).abs()))
+    print("")
+
+    return out_mm_tri.xpu()
+
+    # return c_mm_ref

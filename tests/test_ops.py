@@ -214,16 +214,27 @@ class Test4bitBlockwiseQuantOps:
         out_features = 1024
         in_features = 4096
 
-        A = torch.randn((1, 1, in_features), dtype=dtype, device=device)
+        A = torch.randn((1, in_features), dtype=dtype, device=device)
         B = torch.randn((out_features, in_features), dtype=dtype, device=A.device)
         B_q, absmax = torch.ops.bitsandbytes.quantize_4bit(B, blocksize, quant_type, storage_dtype)
         code = bitsandbytes.functional.get_4bit_type(quant_type, device=A.device, blocksize=blocksize)
 
         out = torch.ops.bitsandbytes.gemv_4bit.default(A, B_q, B.shape, absmax, code, blocksize)
 
+        from bitsandbytes.backends.triton.ops import gemv_4bit
+        out_c = torch.compile(gemv_4bit)(A, B_q, B.shape, absmax, code, blocksize)
+
+        asserr = torch.allclose(out, out_c, atol=1e-2)
+        print("out:", out)
+        print("out_c:", out_c)
+        # torch.allclose(out, out_c)
+        if not asserr:
+            print("out and out_c are not close")
+            raise AssertionError("out and out_c are not close")
+
         assert out.device == A.device
         assert out.dtype == dtype
-        assert out.shape == (1, 1, out_features)
+        assert out.shape == (1, out_features)
         assert out.isreal().all()
 
         torch.library.opcheck(torch.ops.bitsandbytes.gemv_4bit.default, (A, B_q, B.shape, absmax, code, blocksize))
