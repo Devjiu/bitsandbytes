@@ -1,6 +1,6 @@
-import torch
-
 from collections.abc import Sequence
+
+import torch
 
 from bitsandbytes.functional import get_4bit_type
 import triton
@@ -222,7 +222,12 @@ def dequant_int8_blockwise(
     #     quant_blocksize,
     # )
     dequant_8bit_kernel[grid](
-        A_nf4, out, quant_state_code, absmax, number_of_paired_elements, quant_blocksize, # SPLIT_SIZE
+        A_nf4,
+        out,
+        quant_state_code,
+        absmax,
+        number_of_paired_elements,
+        quant_blocksize,  # SPLIT_SIZE
     )
     return out
 
@@ -612,7 +617,7 @@ def dequant_4bit_kernel(
     ) * PAIRED_QUANT_BLOCK + num_paired_elements % PAIRED_QUANT_BLOCK
     abs_offsets = offsets // PAIRED_QUANT_BLOCK
     mask_blocked = offsets < abs_blocks_lim
-    absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked, eviction_policy='evict_last')
+    absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked, eviction_policy="evict_last")
     # abs_offsets = offsets // PAIRED_QUANT_BLOCK
     # absmax = tl.load(absmax_ptr + abs_offsets, mask=mask, other=1.0, eviction_policy="evict_last")
 

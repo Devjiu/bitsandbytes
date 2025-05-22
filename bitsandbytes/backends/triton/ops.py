@@ -4,6 +4,7 @@ import torch
 
 from bitsandbytes.functional import get_4bit_type
 
+_FP4_QUANT_TABLE = get_4bit_type("fp4", device="xpu")
 _NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
 
 try:
