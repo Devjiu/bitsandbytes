@@ -37,17 +37,35 @@ _NF4_QUANT_TABLE = torch.tensor(
 
 # Should be sorted to use binary search
 _FP4_QUANT_TABLE = torch.tensor(
-    [ 0.00000,  0.00521,  0.66667,  1.00000,  0.33333,  0.50000,  0.16667,  0.25000,  0.00000, -0.00521, -0.66667,
-        -1.00000, -0.33333, -0.50000, -0.16667, -0.25000],
+    [
+        0.00000,
+        0.00521,
+        0.66667,
+        1.00000,
+        0.33333,
+        0.50000,
+        0.16667,
+        0.25000,
+        0.00000,
+        -0.00521,
+        -0.66667,
+        -1.00000,
+        -0.33333,
+        -0.50000,
+        -0.16667,
+        -0.25000,
+    ],
     dtype=torch.float32,
     device="xpu",
 )
 
+
 def print_tensor_bin(tensor):
     arr = tensor.flatten().cpu().numpy()
     for i in range(0, len(arr), 4):
-        line = "  ".join(f"{int(v):08b}" for v in arr[i:i+4])
+        line = "  ".join(f"{int(v):08b}" for v in arr[i : i + 4])
         print(line)
+
 
 @torch.compile
 def quantize_blockwise_torch(A, code, blocksize):
@@ -74,6 +92,7 @@ def quantize_blockwise_torch(A, code, blocksize):
     diff = torch.abs(scaled_A.unsqueeze(-1) - code.to(scaled_A.device))
     quantized_out = torch.argmin(diff, dim=-1).to(torch.uint8).to(scaled_A.device).reshape(A.shape)
     return quantized_out, absmax
+
 
 if triton_available:
     register_kernel("bitsandbytes::quantize_blockwise", "xpu")(triton_ops.quantize_blockwise)

@@ -222,6 +222,7 @@ class Test4bitBlockwiseQuantOps:
         out = torch.ops.bitsandbytes.gemv_4bit.default(A, B_q, B.shape, absmax, code, blocksize)
 
         from bitsandbytes.backends.triton.ops import gemv_4bit
+
         out_c = torch.compile(gemv_4bit)(A, B_q, B.shape, absmax, code, blocksize)
 
         asserr = torch.allclose(out, out_c, atol=1e-2)

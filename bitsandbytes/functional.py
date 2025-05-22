@@ -970,11 +970,13 @@ def quantize_nf4(
 ):
     return quantize_4bit(A, absmax, out, blocksize, compress_statistics, "nf4", quant_storage)
 
+
 def print_tensor_bin(tensor):
     arr = tensor.flatten().cpu().numpy()
     for i in range(0, len(arr), 4):
-        line = "  ".join(f"{int(v):08b}" for v in arr[i:i+4])
+        line = "  ".join(f"{int(v):08b}" for v in arr[i : i + 4])
         print(line)
+
 
 def quantize_4bit(
     A: torch.Tensor,

@@ -1119,13 +1119,13 @@ def dquantize_fp4(x: torch.Tensor) -> torch.Tensor:
     branch1 = torch.where(
         cond2,
         torch.where(cond3, torch.full_like(x, 0b0011), torch.full_like(x, 0b0010)),
-        torch.where(cond4, torch.full_like(x, 0b101), torch.full_like(x, 0b100))
+        torch.where(cond4, torch.full_like(x, 0b101), torch.full_like(x, 0b100)),
     )
     # Ветка x_abs <= 0.29166667
     branch2 = torch.where(
         cond5,
         torch.where(cond6, torch.full_like(x, 0b0111), torch.full_like(x, 0b0110)),
-        torch.where(cond7, torch.full_like(x, 0b0001), torch.full_like(x, 0b0000))
+        torch.where(cond7, torch.full_like(x, 0b0001), torch.full_like(x, 0b0000)),
     )
     result = torch.where(cond1, branch1, branch2)
     return (result + sign).to(torch.uint8)
@@ -1134,7 +1134,7 @@ def dquantize_fp4(x: torch.Tensor) -> torch.Tensor:
 def print_tensor_bin(tensor):
     arr = tensor.flatten().cpu().numpy()
     for i in range(0, len(arr), 4):
-        line = "  ".join(f"{int(v):08b}" for v in arr[i:i+4])
+        line = "  ".join(f"{int(v):08b}" for v in arr[i : i + 4])
         print(line)
 
 
@@ -1147,9 +1147,9 @@ def quantize_4bit_torch(
     scaled = blocks / absmax.unsqueeze(-1)
     # quantized = dquantize_fp4(scaled)
     print("\nref quantized even: ", dquantize_fp4(scaled[::2]))
-    print("\nref quantized even bin format: ",print_tensor_bin(dquantize_fp4(scaled[::2])))
+    print("\nref quantized even bin format: ", print_tensor_bin(dquantize_fp4(scaled[::2])))
     print("\nref quantized  odd: ", dquantize_fp4(scaled[1::2]))
-    print("\nref quantized  odd bin format: ",print_tensor_bin(dquantize_fp4(scaled[1::2])))
+    print("\nref quantized  odd bin format: ", print_tensor_bin(dquantize_fp4(scaled[1::2])))
     # quantized = torch.argmin(torch.abs(scaled.view(-1, 1) - _FP4_QUANT_TABLE), dim=-1, keepdim=True).to(
     #     torch.uint8
     # )

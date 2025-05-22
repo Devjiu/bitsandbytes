@@ -1,9 +1,8 @@
 import torch
 
+from bitsandbytes.functional import get_4bit_type
 import triton
 import triton.language as tl
-
-from bitsandbytes.functional import get_4bit_type
 
 # Should be the same for quant/dequant
 _FP4_QUANT_TABLE = get_4bit_type("fp4", device="xpu")
@@ -22,13 +21,13 @@ _NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
         # triton.Config({'SPLIT_SIZE': 128, 'grf_mode': 'auto'}, num_stages=2, num_warps=32),
         # triton.Config({'SPLIT_SIZE': 128, 'grf_mode': 'large'}, num_stages=4, num_warps=32),
         # triton.Config({'SPLIT_SIZE': 128, 'grf_mode': 'auto'}, num_stages=4, num_warps=32),
-        triton.Config({'SPLIT_SIZE': 256}),
+        triton.Config({"SPLIT_SIZE": 256}),
         # triton.Config({'SPLIT_SIZE': 256, 'grf_mode': 'large'}, num_stages=2, num_warps=32),
         # triton.Config({'SPLIT_SIZE': 256, 'grf_mode': 'auto'}, num_stages=2, num_warps=32),
-        triton.Config({'SPLIT_SIZE': 512}),
+        triton.Config({"SPLIT_SIZE": 512}),
         # triton.Config({'SPLIT_SIZE': 1024}),
     ],
-    key=['num_paired_elements', 'QUANT_BLOCK'],
+    key=["num_paired_elements", "QUANT_BLOCK"],
 )
 @triton.jit
 def dequant_8bit_kernel(
@@ -67,6 +66,7 @@ def dequant_8bit_kernel(
     offs = block_start + tl.arange(0, SPLIT_SIZE)
     mask = offs < num_paired_elements
     tl.store(c_ptr + offs, out_dq, mask)
+
 
 # @triton.jit
 # def dequant_8bit_kernel(
@@ -131,6 +131,7 @@ def dequant_8bit_kernel(
 #     tmp9 = tmp7 * tmp8
 #     tl.store(out_ptr0 + (x2), tmp9, None)
 
+
 @triton.autotune(
     configs=[
         # triton.Config({'SPLIT_SIZE': 64}),
@@ -146,10 +147,10 @@ def dequant_8bit_kernel(
         # triton.Config({'SPLIT_SIZE': 256}),
         # triton.Config({'SPLIT_SIZE': 256, 'grf_mode': 'large'}, num_stages=2, num_warps=32),
         # triton.Config({'SPLIT_SIZE': 256, 'grf_mode': 'auto'}, num_stages=2, num_warps=32),
-        triton.Config({'SPLIT_SIZE': 512}),
+        triton.Config({"SPLIT_SIZE": 512}),
         # triton.Config({'SPLIT_SIZE': 1024}),
     ],
-    key=['xnumel', 'QUANT_BLOCK'],
+    key=["xnumel", "QUANT_BLOCK"],
 )
 @triton.jit
 def dequantize_kernel(a_ptr, code_ptr, absmax_ptr, c_ptr, xnumel, QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr):
@@ -184,20 +185,21 @@ def dequantize_kernel(a_ptr, code_ptr, absmax_ptr, c_ptr, xnumel, QUANT_BLOCK: t
 
     # Load the absmax value for the block
     # abs_offsets = xindex // QUANT_BLOCK
-    absmax = tl.load(absmax_ptr + block_index, mask=xmask, other=0, eviction_policy='evict_last')
+    absmax = tl.load(absmax_ptr + block_index, mask=xmask, other=0, eviction_policy="evict_last")
 
     # Load the dequantized values from the codebook
     # Handle potential out-of-bounds indices
     oob_mask = (a_quantized_indices < 0) | (a_quantized_indices >= 256)
     a_quantized_indices = tl.where(oob_mask, tl.zeros(a_quantized_indices.shape, tl.int32), a_quantized_indices)
 
-    dequantized_values = tl.load(code_ptr + a_quantized_indices, mask=xmask, other=0, eviction_policy='evict_last')
+    dequantized_values = tl.load(code_ptr + a_quantized_indices, mask=xmask, other=0, eviction_policy="evict_last")
 
     # Scale the dequantized values by absmax
     output_values = dequantized_values * absmax
 
     # Store the results
     tl.store(c_ptr + xindex, output_values, mask=xmask)
+
 
 def dequant_int8_blockwise_proxy(
     A_nf4: torch.Tensor,
@@ -207,13 +209,19 @@ def dequant_int8_blockwise_proxy(
     quant_blocksize: int = 64,
 ):
     number_of_paired_elements = A_nf4.numel()
-    grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]), )
+    grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]),)
     # grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
-    dequantize_kernel[grid] (
-        A_nf4, quant_state_code, absmax, out, number_of_paired_elements, quant_blocksize,
+    dequantize_kernel[grid](
+        A_nf4,
+        quant_state_code,
+        absmax,
+        out,
+        number_of_paired_elements,
+        quant_blocksize,
     )
 
     return out
+
 
 def dequant_int8_blockwise(
     A_nf4: torch.Tensor,
@@ -222,19 +230,24 @@ def dequant_int8_blockwise(
     out: torch.Tensor,
     quant_blocksize: int = 64,
 ):
-
     number_of_paired_elements = A_nf4.numel()
 
     # SPLIT_SIZE = 256
-    grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]), )
+    grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]),)
     # grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
-    dequantize_kernel[grid] (
-        A_nf4, quant_state_code, absmax, out, number_of_paired_elements, quant_blocksize,
+    dequantize_kernel[grid](
+        A_nf4,
+        quant_state_code,
+        absmax,
+        out,
+        number_of_paired_elements,
+        quant_blocksize,
     )
     # dequant_8bit_kernel[grid](
     #     A_nf4, out, quant_state_code, absmax, number_of_paired_elements, quant_blocksize, # SPLIT_SIZE
     # )
     return out
+
 
 @torch.compile
 def dequantize_8bit_blockwise_torch(
@@ -272,6 +285,7 @@ def dequantize_8bit_blockwise_torch(
     out = out.reshape(A_nf4.shape)
 
     return out.reshape(out_shape)
+
 
 @triton.autotune(
     configs=[
@@ -346,6 +360,7 @@ def quantize_blockwise_kernel(
 
     quantized_flat = tl.reshape(quantized, (BLOCK_SIZE * SPLIT_NUM_BLOCKS,))
     tl.store(out_ptr + offsets, quantized_flat, mask=mask)
+
 
 def quantize_blockwise_triton(A, blocksize, code, blocks, absmax, quantized_out):
     n = A.numel()
@@ -488,15 +503,13 @@ def quantize_fp4_blockwise_kernel(
     result = tl.where(
         A_absf > 0.29166667,
         tl.where(
-            A_absf > 0.583333,
-            tl.where(A_absf > 0.8333333, 0b011, 0b010),
-            tl.where(A_absf > 0.4166667, 0b101, 0b100)
+            A_absf > 0.583333, tl.where(A_absf > 0.8333333, 0b011, 0b010), tl.where(A_absf > 0.4166667, 0b101, 0b100)
         ),
         tl.where(
             A_absf > 0.0859375,
             tl.where(A_absf > 0.20833333, 0b0111, 0b0110),
-            tl.where(A_absf > 0.00260417, 0b0001, 0b0000)
-        )
+            tl.where(A_absf > 0.00260417, 0b0001, 0b0000),
+        ),
     )
     quantized = (result ^ sign).to(tl.uint8)
 
@@ -508,6 +521,7 @@ def quantize_fp4_blockwise_kernel(
     out_offsets = block_start_idx * BLOCK_SIZE // 2 + tl.arange(0, SPLIT_NUM_BLOCKS * BLOCK_SIZE)
     out_mask = out_offsets < n_elements // 2
     tl.store(out_ptr + out_offsets, packed_flat, mask=out_mask)
+
 
 @triton.jit
 def quantize_nf4_blockwise_kernel(
@@ -555,29 +569,13 @@ def quantize_nf4_blockwise_kernel(
 
     branch1 = tl.where(
         cond2,
-        tl.where(
-            cond3,
-            tl.where(cond4, 0b1111, 0b1110),
-            tl.where(cond5, 0b1101, 0b1100)
-        ),
-        tl.where(
-            cond6,
-            tl.where(cond7, 0b1011, 0b1010),
-            tl.where(cond8, 0b1001, 0b1000)
-        )
+        tl.where(cond3, tl.where(cond4, 0b1111, 0b1110), tl.where(cond5, 0b1101, 0b1100)),
+        tl.where(cond6, tl.where(cond7, 0b1011, 0b1010), tl.where(cond8, 0b1001, 0b1000)),
     )
     branch2 = tl.where(
         cond9,
-        tl.where(
-            cond10,
-            tl.where(cond11, 0b0111, 0b0110),
-            tl.where(cond12, 0b0101, 0b0100)
-        ),
-        tl.where(
-            cond13,
-            tl.where(cond14, 0b0011, 0b0010),
-            tl.where(cond15, 0b0001, 0b0000)
-        )
+        tl.where(cond10, tl.where(cond11, 0b0111, 0b0110), tl.where(cond12, 0b0101, 0b0100)),
+        tl.where(cond13, tl.where(cond14, 0b0011, 0b0010), tl.where(cond15, 0b0001, 0b0000)),
     )
     result = tl.where(cond1, branch1, branch2)
     quantized = result.to(tl.uint8)
@@ -609,6 +607,7 @@ def quantize_fp4_blockwise_triton(A, blocksize, blocks, absmax, quantized_out):
     )
 
     return quantized_out, absmax
+
 
 def quantize_nf4_blockwise_triton(A, blocksize, blocks, absmax, quantized_out):
     n = A.numel()
@@ -681,7 +680,7 @@ def dequant_4bit_kernel(
     offsets = block_start + tl.arange(0, SPLIT_SIZE)
     mask = offsets < num_paired_elements
 
-    a = tl.load(a_ptr + offsets, mask, eviction_policy='evict_first')
+    a = tl.load(a_ptr + offsets, mask, eviction_policy="evict_first")
 
     # higher 4bits from uint8 packed tensor
     higher = a & 0xF
@@ -697,7 +696,7 @@ def dequant_4bit_kernel(
     # mask_blocked = offsets < abs_blocks_lim
     # absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked, eviction_policy='evict_last')
     abs_offsets = offsets // PAIRED_QUANT_BLOCK
-    absmax = tl.load(absmax_ptr + abs_offsets, mask=mask, other=1.0, eviction_policy='evict_last')
+    absmax = tl.load(absmax_ptr + abs_offsets, mask=mask, other=1.0, eviction_policy="evict_last")
 
     # out_block_start = pid * SPLIT_SIZE * 2
     # offs_low = out_block_start + 2 * tl.arange(0, SPLIT_SIZE)
@@ -708,8 +707,8 @@ def dequant_4bit_kernel(
     # %7, %8 = gpu.shuffle idx %0, %cst0, %width : f32
 
     # apply conversion
-    lower_4 = tl.load(quant_ptr + lower, eviction_policy='evict_last')
-    higher_4 = tl.load(quant_ptr + higher, eviction_policy='evict_last')
+    lower_4 = tl.load(quant_ptr + lower, eviction_policy="evict_last")
+    higher_4 = tl.load(quant_ptr + higher, eviction_policy="evict_last")
     # print("lower uint: ", lower.view(8, 32))
     # print("lower     : ", lower_4.view(8, 32))
 
@@ -749,7 +748,6 @@ def _dequantize_4bit_impl(
         dequant_4bit_kernel[grid](A, out, _NF4_QUANT_TABLE, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
 
 
-
 # from torch.library import register_fake, register_kernel
 # # my_lib = torch.library.Library("bitsandbytes", "DEF")
 
@@ -777,6 +775,7 @@ def _dequantize_4bit_impl(
 #     else:
 #         return out_fake
 
+
 # @register_kernel("bitsandbytes::_dequantize_4bit_impl_passing_code", "xpu")
 def _dequantize_4bit_impl_passing_code(
     A: torch.Tensor,
@@ -795,12 +794,14 @@ def _dequantize_4bit_impl_passing_code(
     grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
     dequant_4bit_kernel[grid](A, out, code, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
 
-# ==================================================
 
+# ==================================================
 
 
 # experimental
 from collections.abc import Sequence
+
+
 @torch.compile
 def dequant_4bit_blockwise(
     A: torch.Tensor,
@@ -850,6 +851,7 @@ def dequant_4bit_blockwise(
 
     return out_l
 
+
 @triton.jit
 def dequant_4bit_kernel_util(a, offsets, quant_ptr, absmax_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr):
     PAIRED_QUANT_BLOCK = QUANT_BLOCK // 2
@@ -885,6 +887,7 @@ def dequant_4bit_kernel_util(a, offsets, quant_ptr, absmax_ptr, num_paired_eleme
 
 SMALL_GRF = True
 
+
 # @triton.autotune(
 #     configs=[
 #         triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'small'}, num_warps = 64, num_stages = 2),
@@ -912,16 +915,25 @@ SMALL_GRF = True
 @triton.jit
 def matmul_kernel(
     # Pointers to matrices
-    a_ptr, b_ptr, c_ptr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
     # Matrix dimensions
-    M, N, K,
+    M,
+    N,
+    K,
     # The stride variables represent how much to increase the ptr by when moving by 1
     # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
     # by to get the element one row down (A has M rows).
-    stride_am, stride_ak,
-    stride_bn, stride_bk,
-    stride_cm, stride_cn,
-    quant_ptr, absmax_ptr, num_paired_elements,
+    stride_am,
+    stride_ak,
+    stride_bn,
+    stride_bk,
+    stride_cm,
+    stride_cn,
+    quant_ptr,
+    absmax_ptr,
+    num_paired_elements,
     QUANT_BLOCK: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
@@ -961,14 +973,22 @@ def matmul_kernel(
     # a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_offsets = offs_bn[:, None] * stride_bn + offs_bk[None, :] * stride_bk
 
-
-    a_block_ptr = tl.make_block_ptr(base=a_ptr, shape=(M, K), strides=(stride_am, stride_ak),
-                                offsets=(pid_m * BLOCK_SIZE_M, 0), block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
-                                order=(1, 0))
-    b_block_ptr = tl.make_block_ptr(base=b_ptr, shape=(N, K//2), strides=(stride_bn, stride_bk),
-                                    offsets=(pid_n * BLOCK_SIZE_N, 0), block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_K//2),
-                                    order=(1, 0))
-
+    a_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(M, K),
+        strides=(stride_am, stride_ak),
+        offsets=(pid_m * BLOCK_SIZE_M, 0),
+        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
+        order=(1, 0),
+    )
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr,
+        shape=(N, K // 2),
+        strides=(stride_bn, stride_bk),
+        offsets=(pid_n * BLOCK_SIZE_N, 0),
+        block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_K // 2),
+        order=(1, 0),
+    )
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     # dq_b = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_N), dtype=a_ptr.type.element_ty)
@@ -1011,9 +1031,14 @@ def matmul_kernel(
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
-    c_block_ptr = tl.make_block_ptr(base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
-                                    offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
-                                    block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1, 0))
+    c_block_ptr = tl.make_block_ptr(
+        base=c_ptr,
+        shape=(M, N),
+        strides=(stride_cm, stride_cn),
+        offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
+        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+        order=(1, 0),
+    )
     tl.store(c_block_ptr, c, boundary_check=(0, 1))
 
 
@@ -1047,12 +1072,21 @@ def matmul(a, b, shapeB, code, absmax, blocksize):
     # print("state code: ", code)
     number_of_paired_elements = b.numel()
     matmul_kernel[grid](
-        a, b, c,
-        M, N, K,
-        a.stride(0), a.stride(1),  #
-        b.stride(0), b.stride(1),  #
-        c.stride(0), c.stride(1),  #
-        code, absmax, number_of_paired_elements,
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),  #
+        b.stride(0),
+        b.stride(1),  #
+        c.stride(0),
+        c.stride(1),  #
+        code,
+        absmax,
+        number_of_paired_elements,
         blocksize,
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
@@ -1061,11 +1095,9 @@ def matmul(a, b, shapeB, code, absmax, blocksize):
     )
     return c
 
+
 @triton.autotune(
-    configs=[
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1})
-    ],
+    configs=[triton.Config({"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 1})],
     #   + [
     #     triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': m},
     #                   num_stages=s, num_warps=w)
@@ -1081,23 +1113,34 @@ def matmul(a, b, shapeB, code, absmax, blocksize):
     #     for s in [2, 3]
     #     for (m, w) in ([('large', 32), ('small', 64)] if SMALL_GRF else [('large', 32)])
     # ],
-    key=['M', 'N', 'K'],
+    key=["M", "N", "K"],
 )
 @triton.jit
 def matmul_kernel_with_block_pointers_nodq(
-        # Pointers to matrices
-        a_ptr, b_ptr, c_ptr,
-        # Matrix dimensions
-        M, N, K,
-        # The stride variables represent how much to increase the ptr by when moving by 1
-        # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
-        # by to get the element one row down (A has M rows).
-        stride_am, stride_ak,  #
-        stride_bk, stride_bn,  #
-        stride_cm, stride_cn,  #
-        ACCUMULATOR_DTYPE: tl.constexpr,
-        # Meta-parameters
-        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr):
+    # Pointers to matrices
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    # Matrix dimensions
+    M,
+    N,
+    K,
+    # The stride variables represent how much to increase the ptr by when moving by 1
+    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
+    # by to get the element one row down (A has M rows).
+    stride_am,
+    stride_ak,  #
+    stride_bk,
+    stride_bn,  #
+    stride_cm,
+    stride_cn,  #
+    ACCUMULATOR_DTYPE: tl.constexpr,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
     """
@@ -1119,12 +1162,22 @@ def matmul_kernel_with_block_pointers_nodq(
     # Create block pointers for the first blocks of A and B.
     # We will advance this pointer as we move in the K direction and accumulate.
     # See above `Make a Block Pointer` section for details.
-    a_block_ptr = tl.make_block_ptr(base=a_ptr, shape=(M, K), strides=(stride_am, stride_ak),
-                                    offsets=(pid_m * BLOCK_SIZE_M, 0), block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
-                                    order=(1, 0))
-    b_block_ptr = tl.make_block_ptr(base=b_ptr, shape=(K, N), strides=(stride_bk, stride_bn),
-                                    offsets=(0, pid_n * BLOCK_SIZE_N), block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N),
-                                    order=(1, 0))
+    a_block_ptr = tl.make_block_ptr(
+        base=a_ptr,
+        shape=(M, K),
+        strides=(stride_am, stride_ak),
+        offsets=(pid_m * BLOCK_SIZE_M, 0),
+        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
+        order=(1, 0),
+    )
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr,
+        shape=(K, N),
+        strides=(stride_bk, stride_bn),
+        offsets=(0, pid_n * BLOCK_SIZE_N),
+        block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N),
+        order=(1, 0),
+    )
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -1148,10 +1201,16 @@ def matmul_kernel_with_block_pointers_nodq(
     # ----------------------------------------------------------------
     # Write back the block of the output matrix C with boundary checks.
     # See above `Load/Store a Block Pointer` section for details.
-    c_block_ptr = tl.make_block_ptr(base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
-                                    offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
-                                    block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1, 0))
+    c_block_ptr = tl.make_block_ptr(
+        base=c_ptr,
+        shape=(M, N),
+        strides=(stride_cm, stride_cn),
+        offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
+        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+        order=(1, 0),
+    )
     tl.store(c_block_ptr, c, boundary_check=(0, 1))
+
 
 def simple_mm(a, b, accum_dtype, res_dtype):
     print("a shape: ", a.shape, " b shape: ", b.shape)
@@ -1162,17 +1221,25 @@ def simple_mm(a, b, accum_dtype, res_dtype):
     K, N = b.shape
     c = torch.empty((M, N), device=a.device, dtype=torch.float32)
     # Map accumulator type, e.g. `torch.float16` -> `tl.fp16`
-    triton_accum_dtype = tl.dtype(str(accum_dtype)[6:].replace('bfloat', 'bf').replace('float', 'fp'))
+    triton_accum_dtype = tl.dtype(str(accum_dtype)[6:].replace("bfloat", "bf").replace("float", "fp"))
     print("triton accum dtype: ", triton_accum_dtype, " res dtype: ", res_dtype)
     # 1D launch kernel where each block gets its own program.
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),)
     matmul_kernel_with_block_pointers_nodq[grid](
-        a, b, c,  #
-        M, N, K,  #
-        a.stride(0), a.stride(1),  #
-        b.stride(0), b.stride(1),  #
-        c.stride(0), c.stride(1),  #
-        ACCUMULATOR_DTYPE=triton_accum_dtype)
+        a,
+        b,
+        c,  #
+        M,
+        N,
+        K,  #
+        a.stride(0),
+        a.stride(1),  #
+        b.stride(0),
+        b.stride(1),  #
+        c.stride(0),
+        c.stride(1),  #
+        ACCUMULATOR_DTYPE=triton_accum_dtype,
+    )
     return c
 
 
@@ -1201,9 +1268,10 @@ def _matmul_launch_metadata(grid, kernel, args):
         bytes_per_elem = args["c_ptr"].element_size()
     else:
         bytes_per_elem = 1 if args["FP8_OUTPUT"] else 2
-    ret[f"flops{bytes_per_elem * 8}"] = 2. * M * N * K
+    ret[f"flops{bytes_per_elem * 8}"] = 2.0 * M * N * K
     ret["bytes"] = bytes_per_elem * (M * K + N * K + M * N)
     return ret
+
 
 @triton.jit
 def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
@@ -1214,32 +1282,47 @@ def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
     pid_n = (tile_id % num_pid_in_group) // group_size_m
     return pid_m, pid_n
 
+
 def matmul_get_configs(pre_hook=None):
     return [
-        triton.Config({'BLOCK_SIZE_M': BM, 'BLOCK_SIZE_N': BN, "BLOCK_SIZE_K" : BK, "GROUP_SIZE_M" : 8}, num_stages=s, num_warps=w, pre_hook=pre_hook) \
-        for BM in [128] \
-        for BN in [128, 256] \
-        for BK in [64,128] \
-        for s in ([3,4]) \
-        for w in [4,8] \
+        triton.Config(
+            {"BLOCK_SIZE_M": BM, "BLOCK_SIZE_N": BN, "BLOCK_SIZE_K": BK, "GROUP_SIZE_M": 8},
+            num_stages=s,
+            num_warps=w,
+            pre_hook=pre_hook,
+        )
+        for BM in [128]
+        for BN in [128, 256]
+        for BK in [64, 128]
+        for s in ([3, 4])
+        for w in [4, 8]
     ]
+
 
 @triton.autotune(
     configs=matmul_get_configs(),
     key=["M", "N", "K"],
 )
 @triton.jit(launch_metadata=_matmul_launch_metadata)
-def matmul_kernel_persistent(a_ptr, b_ptr, c_ptr,  #
-                             M, N, K,  #
-                             stride_am, stride_ak,  #
-                             stride_bk, stride_bn,  #
-                             stride_cm, stride_cn,  #
-                             BLOCK_SIZE_M: tl.constexpr,  #
-                             BLOCK_SIZE_N: tl.constexpr,  #
-                             BLOCK_SIZE_K: tl.constexpr,  #
-                             GROUP_SIZE_M: tl.constexpr,  #
-                             NUM_SMS: tl.constexpr,  #
-                             ):
+def matmul_kernel_persistent(
+    a_ptr,
+    b_ptr,
+    c_ptr,  #
+    M,
+    N,
+    K,  #
+    stride_am,
+    stride_ak,  #
+    stride_bk,
+    stride_bn,  #
+    stride_cm,
+    stride_cn,  #
+    BLOCK_SIZE_M: tl.constexpr,  #
+    BLOCK_SIZE_N: tl.constexpr,  #
+    BLOCK_SIZE_K: tl.constexpr,  #
+    GROUP_SIZE_M: tl.constexpr,  #
+    NUM_SMS: tl.constexpr,  #
+):
     start_pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -1280,7 +1363,7 @@ def matmul_kernel_persistent(a_ptr, b_ptr, c_ptr,  #
         offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-        if (c_ptr.dtype.element_ty == tl.float8e4nv):
+        if c_ptr.dtype.element_ty == tl.float8e4nv:
             c = accumulator.to(tl.float8e4nv)
         else:
             c = accumulator.to(tl.float16)
@@ -1299,13 +1382,20 @@ def matmul_persistent(a, b):
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=dtype)
     # 1D launch kernel where each block gets its own program.
-    grid = lambda META: (min(NUM_SMS, triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"])), )
+    grid = lambda META: (min(NUM_SMS, triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"])),)
     matmul_kernel_persistent[grid](
-        a, b, c,  #
-        M, N, K,  #
-        a.stride(0), a.stride(1),  #
-        b.stride(0), b.stride(1),  #
-        c.stride(0), c.stride(1),  #
+        a,
+        b,
+        c,  #
+        M,
+        N,
+        K,  #
+        a.stride(0),
+        a.stride(1),  #
+        b.stride(0),
+        b.stride(1),  #
+        c.stride(0),
+        c.stride(1),  #
         NUM_SMS=NUM_SMS,  #
     )
     return c
