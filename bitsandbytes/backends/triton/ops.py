@@ -37,8 +37,8 @@ def dequantize_blockwise(
     torch._check_is_size(blocksize)
     torch._check(A.dtype == torch.uint8, lambda: f"A must be uint8, got {A.dtype}")
     # torch._check(dtype == torch.float32, lambda: f"dtype must be float32 on xpu, got {dtype}")
-    out = torch.empty_like(A, dtype=dtype, device=A.device)
 
+    out = torch.empty_like(A, dtype=dtype, device=A.device)
     triton_kernels.dequant_int8_blockwise(
         A,
         code,
@@ -92,7 +92,6 @@ def quantize_4bit(
         triton_kernels.quantize_fp4_blockwise_triton(A, blocksize, blocks, absmax, out)
     else:
         triton_kernels.quantize_nf4_blockwise_triton(A, blocksize, blocks, absmax, out)
-        # triton_kernels.quantize_nf4_blockwise_triton(A, blocksize, _NF4_QUANT_TABLE, blocks, absmax, out)
     packed = out
 
     if quant_storage != torch.uint8:
@@ -115,10 +114,13 @@ def dequantize_4bit(
         dtype in [torch.bfloat16, torch.float16, torch.float32],
         lambda: f"Blockwise 4bit dequantization only supports 16/32-bit floats, but got {dtype}",
     )
+    # torch._check(
+    #     A.dtype == torch.uint8,
+    #     lambda: f"Blockwise 4bit dequantization on XPU only supports uint8 storage, got {A.dtype}",
+    # )
     # Check if this is fine and fast
     if A.dtype != torch.uint8:
         A = A.squeeze().view(torch.uint8).unsqueeze(1)
-    # print("A.dtype", A.dtype, " dtype: ", dtype)
     out = torch.empty(shape, dtype=dtype, device=A.device)
 
     triton_kernels._dequantize_4bit_impl(A, absmax, blocksize, quant_type, dtype, out=out)
@@ -147,8 +149,8 @@ def gemv_4bit(
     code: torch.Tensor,
     blocksize: int,
 ) -> torch.Tensor:
-    if B.dtype != torch.uint8:
-        B = B.squeeze().view(torch.uint8).unsqueeze(1)
+    # if B.dtype != torch.uint8:
+    #     B = B.squeeze().view(torch.uint8).unsqueeze(1)
 
     # B_dq = torch.empty(shapeB, dtype=A.dtype, device=A.device)
     # triton_kernels._dequantize_4bit_impl_passing_code(

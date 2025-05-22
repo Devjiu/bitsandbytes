@@ -1019,23 +1019,7 @@ def quantize_4bit(
         quant_storage,
     )
 
-    # from bitsandbytes.backends.xpu.ops import quantize_4bit_torch
-    # _out, _absmax = quantize_4bit_torch(
-    #     A,
-    #     blocksize,
-    #     quant_type,
-    #     quant_storage,
-    # )
-    # print("out_ref diff: ", (_out_ref - _out).sum())
-    # print("out_ref : ")
-    # print_tensor_bin(_out_ref)
-    # print("out : ")
-    # print_tensor_bin(_out)
-    # print("absmax_ref : ", _absmax_ref)
-    # print("absmax : ", _absmax)
-
     code = get_4bit_type(quant_type, device=A.device)
-    # print("code : ", code)
 
     if compress_statistics:
         offset = _absmax.mean()
@@ -1730,11 +1714,9 @@ def gemv_4bit(
 
     absmax = state.absmax
     if state.nested:
-        # print("calling neested/ aka blockwise")
         absmax = dequantize_blockwise(absmax, state.state2) + state.offset
 
     if out is not None:
-        # print("calling gemv inplace")
         torch.ops.bitsandbytes.gemv_4bit.out(
             A,
             B,
@@ -1745,7 +1727,6 @@ def gemv_4bit(
             out=out,
         )
         return out
-    # print("calling gemv default")
     return torch.ops.bitsandbytes.gemv_4bit.default(
         A,
         B,

@@ -1101,7 +1101,6 @@ class TestSparseTensorFunctional:
         torch.testing.assert_close(A2.t()[idx], cscA.values)
 
 
-
 class TestQuantize4BitFunctional:
     @pytest.mark.parametrize("device", get_available_devices())
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=describe_dtype)
@@ -1258,23 +1257,10 @@ class TestQuantize4BitFunctional:
                 compress_statistics=double_quant,
                 quant_storage=quant_storage,
             )
-            # print("dtype: ", dtype)
-            # print("a ", A.dtype, " b ", B.dtype)
-            A = A.to(torch.float32)
-            B = B.to(torch.float32)
             C3 = torch.matmul(A, B.t())
-            # if state.dtype != A.dtype:
-            #     print("Dtypes are differ: state - ", state.dtype, " a dtype - ", A.dtype)
             C2 = F.gemv_4bit(A, qB.t(), state=state)
             A.requires_grad = True
             C1 = bnb.matmul_4bit(A, qB.t(), state)
-            # print("A: ", A.dtype)
-            # print("C1: ", C1.dtype)
-            # print("C2: ", C2.dtype)
-            # print("C1: ", C1)
-            # print("C2: ", C2)
-            # print("C1: ", C1[0][0])
-            # print("C2: ", C2[0][0])
 
             err1 = (C1 - C2).abs().float()
             err2 = (C3 - C2).abs().float()
@@ -1316,7 +1302,6 @@ class TestQuantize4BitFunctional:
         maxerr1 = sum(max_errs1) / len(max_errs1) / math.sqrt(dim)
         maxerr2 = sum(max_errs2) / len(max_errs2) / math.sqrt(dim)
         maxerr3 = sum(max_errs3) / len(max_errs3) / math.sqrt(dim)
-        # print("err1: ", err1, " err2: ", err2, " err3: ", err3)
         absratio = err2 / err3
         relratio = relerr2 / relerr3
         maxratio = relerr2 / relerr3

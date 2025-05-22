@@ -1,40 +1,13 @@
 import torch
 
+from collections.abc import Sequence
+
 from bitsandbytes.functional import get_4bit_type
 import triton
 import triton.language as tl
 
 # Should be the same for quant/dequant
 _FP4_QUANT_TABLE = get_4bit_type("fp4", device="xpu")
-# print("fp4 quant table", _FP4_QUANT_TABLE)
-# _FP4_QUANT_TABLE = torch.tensor([ 0.0000,  0.0052,  0.6667,  1.0000,  0.3333,  0.5000,  0.1667,  0.2500,
-#          0.0000, -0.0052, -0.6667, -1.0000, -0.3333, -0.5000, -0.1667, -0.2500],
-#     dtype=torch.float32,
-#     device="xpu",
-# )
-# _NF4_QUANT_TABLE = torch.tensor(
-#     [
-#         -1.0,
-#         -0.6961928009986877,
-#         -0.5250730514526367,
-#         -0.39491748809814453,
-#         -0.28444138169288635,
-#         -0.18477343022823334,
-#         -0.09105003625154495,
-#         0.0,
-#         0.07958029955625534,
-#         0.16093020141124725,
-#         0.24611230194568634,
-#         0.33791524171829224,
-#         0.44070982933044434,
-#         0.5626170039176941,
-#         0.7229568362236023,
-#         1.0,
-#     ],
-#     dtype=torch.float32,
-#     device="xpu",
-# )
-
 _NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
 
 
@@ -75,9 +48,7 @@ def dequant_8bit_kernel(
 
     a = tl.load(a_ptr + offsets, mask)
     a = a.to(tl.uint8)
-
     # code = tl.load(quant_ptr + tl.arange(0, 256))
-
     # # Gather the values from the codebook using the indices in 'a'
     # scaled_int8 = tl.gather(code, a, axis=0)
 
@@ -230,28 +201,6 @@ def dequantize_kernel(a_ptr, code_ptr, absmax_ptr, c_ptr, xnumel, QUANT_BLOCK: t
     tl.store(c_ptr + xindex, output_values, mask=xmask)
 
 
-def dequant_int8_blockwise_proxy(
-    A_nf4: torch.Tensor,
-    quant_state_code: torch.Tensor,
-    absmax: torch.Tensor,
-    out: torch.Tensor,
-    quant_blocksize: int = 64,
-):
-    number_of_paired_elements = A_nf4.numel()
-    grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]),)
-    # grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
-    dequantize_kernel[grid](
-        A_nf4,
-        quant_state_code,
-        absmax,
-        out,
-        number_of_paired_elements,
-        quant_blocksize,
-    )
-
-    return out
-
-
 def dequant_int8_blockwise(
     A_nf4: torch.Tensor,
     quant_state_code: torch.Tensor,
@@ -264,56 +213,18 @@ def dequant_int8_blockwise(
     # SPLIT_SIZE = 256
     grid = lambda META: (triton.cdiv(number_of_paired_elements, META["SPLIT_SIZE"]),)
     # grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
-    dequantize_kernel[grid](
-        A_nf4,
-        quant_state_code,
-        absmax,
-        out,
-        number_of_paired_elements,
-        quant_blocksize,
-    )
-    # dequant_8bit_kernel[grid](
-    #     A_nf4, out, quant_state_code, absmax, number_of_paired_elements, quant_blocksize, # SPLIT_SIZE
+    # dequantize_kernel[grid](
+    #     A_nf4,
+    #     quant_state_code,
+    #     absmax,
+    #     out,
+    #     number_of_paired_elements,
+    #     quant_blocksize,
     # )
+    dequant_8bit_kernel[grid](
+        A_nf4, out, quant_state_code, absmax, number_of_paired_elements, quant_blocksize, # SPLIT_SIZE
+    )
     return out
-
-
-@torch.compile
-def dequantize_8bit_blockwise_torch(
-    A_nf4: torch.Tensor,
-    quant_state_code: torch.Tensor,
-    absmax: torch.Tensor,
-    out: torch.Tensor,
-    quant_blocksize: int = 64,
-):
-    """
-    Dequantizes an int8 blockwise quantized tensor using torch operations.
-
-    Args:
-        A_nf4: The int8 quantized tensor.
-        quant_state_code: The quantization codebook (usually _NF4_QUANT_TABLE or _FP4_QUANT_TABLE).
-        absmax: The absolute maximum values for each block.
-        quant_blocksize: The block size used for quantization.
-
-    Returns:
-        The dequantized tensor.
-    """
-
-    # n = A_nf4.numel()
-    out_shape = A_nf4.shape  # Preserve the original shape
-    # A_nf4 = A_nf4.flatten()  # Flatten for easier indexing
-
-    # Calculate the number of blocks
-    out = quant_state_code[A_nf4.reshape(-1).int()]
-    blocks = out.shape[-1] // quant_blocksize
-    res = out.shape[-1] % quant_blocksize
-    if res != 0:
-        out = torch.nn.functional.pad(out, (0, quant_blocksize - res), mode="constant", value=0)
-    out = (out.view(-1, quant_blocksize) * absmax.view(-1, 1)).to(out.dtype).reshape(-1)
-    out = out[: blocks * quant_blocksize + res]
-    out = out.reshape(A_nf4.shape)
-
-    return out.reshape(out_shape)
 
 
 @triton.autotune(
@@ -466,7 +377,7 @@ def quantize_4bit_blockwise_kernel(
     left, right = quantized.split()
     packed = left << 4 | (right & 0xF)
 
-    # мб не гарнтирует порядок
+    # Reduce don't guarantee the order of the elements passed to unite_2_int4
     # packed = tl.reduce(quantized, axis=2, combine_fn=unite_2_int4)
     # packed = packed.to(tl.uint8, bitcast=True)
 
@@ -506,13 +417,6 @@ def quantize_fp4_blockwise_kernel(
 
     sign = tl.where(A_normalized < 0, 0b1000, 0b0000)
     A_absf = tl.abs(A_normalized)
-    # cond1 = A_absf > 0.29166667
-    # cond2 = A_absf > 0.583333
-    # cond3 = A_absf > 0.8333333
-    # cond4 = A_absf > 0.4166667
-    # cond5 = A_absf > 0.0859375
-    # cond6 = A_absf > 0.20833333
-    # cond7 = A_absf > 0.00260417
 
     result = tl.where(
         A_absf > 0.29166667,
@@ -813,7 +717,6 @@ def _dequantize_4bit_impl_passing_code(
 
 
 # experimental
-from collections.abc import Sequence
 
 
 @torch.compile
