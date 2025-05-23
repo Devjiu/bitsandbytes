@@ -515,49 +515,70 @@ def quantize_nf4_blockwise_kernel(
     tl.store(out_ptr + out_offsets, packed_flat, mask=out_mask)
 
 
-def quantize_fp4_blockwise_triton(A, blocksize, blocks, absmax, quantized_out):
-    n = A.numel()
-
+def quantize_4bit_blockwise_triton(A, blocksize, quant_type, blocks, absmax, num_elements, quantized_out):
     # grid = lambda META: (triton.cdiv(blocks, META["SPLIT_NUM_BLOCKS"]),)
-    grid = (triton.cdiv(blocks, 2),)
-    quantize_fp4_blockwise_kernel[grid](
-        A_ptr=A,
-        absmax_ptr=absmax,
-        out_ptr=quantized_out,
-        n_elements=n,
-        BLOCK_SIZE=blocksize,
-        SPLIT_NUM_BLOCKS=2,
-    )
-
+    split_num_blocks = 1
+    grid = (triton.cdiv(blocks, split_num_blocks),)
+    if quant_type == "fp4":
+        quantize_fp4_blockwise_kernel[grid](
+            A_ptr=A,
+            absmax_ptr=absmax,
+            out_ptr=quantized_out,
+            n_elements=num_elements,
+            BLOCK_SIZE=blocksize,
+            SPLIT_NUM_BLOCKS=split_num_blocks,
+        )
+    else:
+        quantize_nf4_blockwise_kernel[grid](
+            A_ptr=A,
+            absmax_ptr=absmax,
+            out_ptr=quantized_out,
+            n_elements=num_elements,
+            BLOCK_SIZE=blocksize,
+            SPLIT_NUM_BLOCKS=split_num_blocks,
+        )
     return quantized_out, absmax
 
 
-def quantize_nf4_blockwise_triton(A, blocksize, blocks, absmax, quantized_out):
-    n = A.numel()
+@triton.jit
+def dequant_4bit_body_util(a, offsets, quant_ptr, absmax_ptr, n_elems, QUANT_BLOCK: tl.constexpr):
+    PAIRED_QUANT_BLOCK:tl.constexpr = QUANT_BLOCK // 2
+    mask = offsets < n_elems
+    higher = a & 0xF
+    # print("higher: ", higher)
+    # lower 4bits
+    lower = a >> 4
+    # print("lower: ", lower)
 
-    # split_num_blocks = 1
-    # grid = (triton.cdiv(blocks, split_num_blocks),)
-    grid = (triton.cdiv(blocks, 2),)
-    quantize_nf4_blockwise_kernel[grid](
-        A_ptr=A,
-        absmax_ptr=absmax,
-        out_ptr=quantized_out,
-        n_elements=n,
-        BLOCK_SIZE=blocksize,
-        SPLIT_NUM_BLOCKS=2,
-    )
-    # grid = lambda META: (triton.cdiv(blocks, META["SPLIT_NUM_BLOCKS"]),)
-    # quantize_4bit_blockwise_kernel[grid](
-    #     A_ptr=A,
-    #     code_ptr=code,
-    #     absmax_ptr=absmax,
-    #     out_ptr=quantized_out,
-    #     n_elements=n,
-    #     BLOCK_SIZE=blocksize,
-    #     CODE_SIZE=code.numel(),
-    # )
+    # abs_blocks_lim = (
+    #     num_paired_elements // PAIRED_QUANT_BLOCK
+    # ) * PAIRED_QUANT_BLOCK + num_paired_elements % PAIRED_QUANT_BLOCK
+    # abs_offsets = offsets // PAIRED_QUANT_BLOCK
+    # mask_blocked = offsets < abs_blocks_lim
+    # absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked, eviction_policy="evict_last")
+    abs_offsets = offsets // PAIRED_QUANT_BLOCK
+    absmax = tl.load(absmax_ptr + abs_offsets, mask=mask, other=1.0, eviction_policy="evict_last")
 
-    return quantized_out, absmax
+    # out_block_start = pid * SPLIT_SIZE * 2
+    # offs_low = out_block_start + 2 * tl.arange(0, SPLIT_SIZE)
+    # offs_high = offs_low + 1
+
+    # shuffle idx типа должен тут работать, мб inline asm
+    # %cst0 = arith.constant 0 : i32
+    # %7, %8 = gpu.shuffle idx %0, %cst0, %width : f32
+
+    # apply conversion
+    lower_4 = tl.load(quant_ptr + lower, eviction_policy="evict_last")
+    higher_4 = tl.load(quant_ptr + higher, eviction_policy="evict_last")
+    # print("lower uint: ", lower.view(8, 32))
+    # print("lower     : ", lower_4.view(8, 32))
+
+    # out_ref = tl.interleave(lower_4, higher_4)
+    # print("out_ref: ", out_ref)
+    mul_high = higher_4 * absmax
+    mul_low = lower_4 * absmax
+    out_dq = tl.interleave(mul_low, mul_high)
+    return out_dq
 
 
 # @triton.autotune(
@@ -596,8 +617,6 @@ def quantize_nf4_blockwise_triton(A, blocksize, blocks, absmax, quantized_out):
 def dequant_4bit_kernel(
     a_ptr, c_ptr, quant_ptr, absmax_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr
 ):
-    PAIRED_QUANT_BLOCK: tl.constexpr = QUANT_BLOCK // 2
-
     pid = tl.program_id(axis=0)  # We use a 1D launch grid so axis is 0.
     block_start = pid * SPLIT_SIZE
     offsets = block_start + tl.arange(0, SPLIT_SIZE)
@@ -605,41 +624,7 @@ def dequant_4bit_kernel(
 
     a = tl.load(a_ptr + offsets, mask, eviction_policy="evict_first")
 
-    # higher 4bits from uint8 packed tensor
-    higher = a & 0xF
-    # print("higher: ", higher)
-    # lower 4bits
-    lower = a >> 4
-    # print("lower: ", lower)
-
-    abs_blocks_lim = (
-        num_paired_elements // PAIRED_QUANT_BLOCK
-    ) * PAIRED_QUANT_BLOCK + num_paired_elements % PAIRED_QUANT_BLOCK
-    abs_offsets = offsets // PAIRED_QUANT_BLOCK
-    mask_blocked = offsets < abs_blocks_lim
-    absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked, eviction_policy="evict_last")
-    # abs_offsets = offsets // PAIRED_QUANT_BLOCK
-    # absmax = tl.load(absmax_ptr + abs_offsets, mask=mask, other=1.0, eviction_policy="evict_last")
-
-    # out_block_start = pid * SPLIT_SIZE * 2
-    # offs_low = out_block_start + 2 * tl.arange(0, SPLIT_SIZE)
-    # offs_high = offs_low + 1
-
-    # shuffle idx типа должен тут работать, мб inline asm
-    # %cst0 = arith.constant 0 : i32
-    # %7, %8 = gpu.shuffle idx %0, %cst0, %width : f32
-
-    # apply conversion
-    lower_4 = tl.load(quant_ptr + lower, eviction_policy="evict_last")
-    higher_4 = tl.load(quant_ptr + higher, eviction_policy="evict_last")
-    # print("lower uint: ", lower.view(8, 32))
-    # print("lower     : ", lower_4.view(8, 32))
-
-    # out_ref = tl.interleave(lower_4, higher_4)
-    # print("out_ref: ", out_ref)
-    mul_high = higher_4 * absmax
-    mul_low = lower_4 * absmax
-    out_dq = tl.interleave(mul_low, mul_high)
+    out_dq = dequant_4bit_body_util(a=a, offsets=offsets, quant_ptr=quant_ptr, absmax_ptr=absmax_ptr, n_elems=num_paired_elements, QUANT_BLOCK=QUANT_BLOCK)
 
     out_block_start = pid * SPLIT_SIZE * 2
     offs = out_block_start + tl.arange(0, SPLIT_SIZE * 2)
@@ -927,14 +912,15 @@ def matmul_kernel(
         b_blck = tl.load(b_block_ptr, boundary_check=(0, 1))
         # print("loaded b: ", b)
         # print("loaded b block offs: ", b_offsets)
-        dq_b_t = dequant_4bit_kernel_util(
-            b_blck,
-            b_offsets,
-            quant_ptr,
-            absmax_ptr,
-            num_paired_elements,
-            QUANT_BLOCK,
-        )
+        # dq_b_t = dequant_4bit_kernel_util(
+        #     b_blck,
+        #     b_offsets,
+        #     quant_ptr,
+        #     absmax_ptr,
+        #     num_paired_elements,
+        #     QUANT_BLOCK,
+        # )
+        dq_b_t = dequant_4bit_body_util(a=a_blck, offsets=b_offsets, quant_ptr=quant_ptr, absmax_ptr=absmax_ptr,n_elems= num_paired_elements, QUANT_BLOCK=QUANT_BLOCK)
         # print("dq_b_t: ", dq_b_t)
         dq_b_t = dq_b_t.trans()
         # print(dq_b_t)

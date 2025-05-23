@@ -73,7 +73,6 @@ def quantize_4bit(
     A: torch.Tensor, blocksize: int, quant_type: str, quant_storage: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:
     torch._check_is_size(blocksize)
-    # torch._check(quant_type == "nf4", lambda: f"quant_type must be nf4 on CPU, got {quant_type}")
     torch._check(
         A.dtype in [torch.bfloat16, torch.float16, torch.float32],
         lambda: f"Blockwise 4bit quantization only supports 16/32-bit floats, but got {A.dtype}",
@@ -81,18 +80,16 @@ def quantize_4bit(
 
     n = A.numel()
 
-    # TODO: Support when weight matrix is not divisible by blocksize
+    # # TODO: Support when weight matrix is not divisible by blocksize
     torch._check(n % blocksize == 0, lambda: f"n must be divisible by blocksize, got {n} and {blocksize}")
+    # Actually kernel is fine with this, but we should find test with it and update wrapping code
 
     blocks = -(n // -(blocksize * 2))
 
     absmax = torch.empty((blocks * 2,), device=A.device, dtype=A.dtype)
     out = torch.empty((n // 2, 1), device=A.device, dtype=torch.uint8)
 
-    if quant_type == "fp4":
-        triton_kernels.quantize_fp4_blockwise_triton(A, blocksize, blocks, absmax, out)
-    else:
-        triton_kernels.quantize_nf4_blockwise_triton(A, blocksize, blocks, absmax, out)
+    triton_kernels.quantize_4bit_blockwise_triton(A, blocksize, quant_type, blocks, absmax, num_elements=n, quantized_out=out)
     packed = out
 
     if quant_storage != torch.uint8:

@@ -866,7 +866,9 @@ def dequantize_blockwise(
         quant_state.dtype,
     )
 
+from functools import lru_cache
 
+@lru_cache
 def get_4bit_type(typename, device=None, blocksize=64):
     if device is None:
         device = "cuda"
