@@ -1,5 +1,3 @@
-from collections.abc import Sequence
-
 import torch
 
 from bitsandbytes.functional import get_4bit_type
@@ -697,8 +695,11 @@ def _dequantize_4bit_impl_passing_code(
         # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 4}),
         # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}, num_stages=2,
         #               num_warps=32),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4}, num_stages=2,
-                      num_warps=32),
+        triton.Config(
+            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 4},
+            num_stages=2,
+            num_warps=32,
+        ),
         # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 4}, num_stages=2,
         #               num_warps=32),
         # # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
@@ -710,7 +711,7 @@ def _dequantize_4bit_impl_passing_code(
         # # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
         # #               num_warps=32),
     ],
-    key=['M', 'N', 'K'],
+    key=["M", "N", "K"],
 )
 @triton.jit
 def matmul_kernel(
@@ -855,8 +856,7 @@ def matmul_kernel(
     tl.store(c_block_ptr, c, boundary_check=(0, 1))
 
 
-
-# Common scenarion is A batched, B is just 2d
+# Common scenario is A batched, B is just 2d
 def matmul(a, b, shapeB, code, absmax, blocksize):
     # Check constraints.
     # assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -881,13 +881,13 @@ def matmul(a, b, shapeB, code, absmax, blocksize):
         assert shapeB[0] == B, "Incompatible batch size"
         assert shapeB[1] == K, "Incompatible dimensions"
         B, N, K = shapeB
-        stride_bz, stride_bn, stride_bk = N*K//2, K//2, 1
+        stride_bz, stride_bn, stride_bk = N * K // 2, K // 2, 1
         c = torch.empty((B, M, N), device=a.device, dtype=a.dtype)
 
     if len(shapeB) == 2:
         N, K = shapeB
         b = b.view(N, K // 2)
-        stride_bz, stride_bn, stride_bk = N*K//2, K//2, 1
+        stride_bz, stride_bn, stride_bk = N * K // 2, K // 2, 1
         if len(a.shape) >= 3:
             c = torch.empty((B, M, N), device=a.device, dtype=a.dtype)
             stride_cz, stride_cm, stride_cn = c.stride(0), c.stride(1), c.stride(2)
@@ -905,9 +905,9 @@ def matmul(a, b, shapeB, code, absmax, blocksize):
     # 1D launch kernel where each block gets its own program.
     # grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),B, )
     grid = lambda META: (
-            triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
-            B,
-        )
+        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+        B,
+    )
     accum_dtype = a.dtype
     if a.dtype in (torch.bfloat16, torch.float16):
         accum_dtype = torch.float32
@@ -918,11 +918,21 @@ def matmul(a, b, shapeB, code, absmax, blocksize):
     # print("state code: ", code)
     number_of_paired_elements = b.numel()
     matmul_kernel[grid](
-        a, b, c, # tensors
-        M, N, K, # sizes
-        stride_az, stride_am, stride_ak,  #
-        stride_bz, stride_bn, stride_bk,  #
-        stride_cz, stride_cm, stride_cn,  #
+        a,
+        b,
+        c,  # tensors
+        M,
+        N,
+        K,  # sizes
+        stride_az,
+        stride_am,
+        stride_ak,  #
+        stride_bz,
+        stride_bn,
+        stride_bk,  #
+        stride_cz,
+        stride_cm,
+        stride_cn,  #
         code,
         absmax,
         number_of_paired_elements,
