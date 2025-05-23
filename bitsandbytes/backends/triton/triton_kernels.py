@@ -542,7 +542,7 @@ def quantize_4bit_blockwise_triton(A, blocksize, quant_type, blocks, absmax, num
 
 @triton.jit
 def dequant_4bit_body_util(a, offsets, quant_ptr, absmax_ptr, n_elems, QUANT_BLOCK: tl.constexpr):
-    PAIRED_QUANT_BLOCK:tl.constexpr = QUANT_BLOCK // 2
+    PAIRED_QUANT_BLOCK: tl.constexpr = QUANT_BLOCK // 2
     mask = offsets < n_elems
     higher = a & 0xF
     # print("higher: ", higher)
@@ -624,7 +624,14 @@ def dequant_4bit_kernel(
 
     a = tl.load(a_ptr + offsets, mask, eviction_policy="evict_first")
 
-    out_dq = dequant_4bit_body_util(a=a, offsets=offsets, quant_ptr=quant_ptr, absmax_ptr=absmax_ptr, n_elems=num_paired_elements, QUANT_BLOCK=QUANT_BLOCK)
+    out_dq = dequant_4bit_body_util(
+        a=a,
+        offsets=offsets,
+        quant_ptr=quant_ptr,
+        absmax_ptr=absmax_ptr,
+        n_elems=num_paired_elements,
+        QUANT_BLOCK=QUANT_BLOCK,
+    )
 
     out_block_start = pid * SPLIT_SIZE * 2
     offs = out_block_start + tl.arange(0, SPLIT_SIZE * 2)
@@ -656,35 +663,6 @@ def _dequantize_4bit_impl(
         dequant_4bit_kernel[grid](A, out, _NF4_QUANT_TABLE, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
 
 
-# from torch.library import register_fake, register_kernel
-# # my_lib = torch.library.Library("bitsandbytes", "DEF")
-
-# torch.library.define(
-#     "bitsandbytes::_dequantize_4bit_impl_passing_code",
-#     "(Tensor A, Tensor absmax, int blocksize, Tensor code, ScalarType dtype, Tensor out) -> None",
-# )
-
-
-# # @my_lib.impl("_dequantize_4bit_impl_passing_code", "meta")
-# @register_fake("bitsandbytes::_dequantize_4bit_impl_passing_code")
-# def _dequantize_4bit_impl_passing_code_fake(
-#     A: torch.Tensor,
-#     absmax: torch.Tensor,
-#     blocksize: int,
-#     code: torch.Tensor,
-#     dtype: torch.dtype,
-#     out: torch.Tensor,
-# ) -> None:
-#     # Просто заполняем выходной тензор "out" пустыми значениями нужного типа и формы
-#     out_shape = out.shape if out is not None else A.shape
-#     out_fake = torch.empty(out_shape, dtype=dtype, device='meta')
-#     if out is not None:
-#         out.copy_(out_fake)
-#     else:
-#         return out_fake
-
-
-# @register_kernel("bitsandbytes::_dequantize_4bit_impl_passing_code", "xpu")
 def _dequantize_4bit_impl_passing_code(
     A: torch.Tensor,
     absmax: torch.Tensor,
@@ -704,95 +682,6 @@ def _dequantize_4bit_impl_passing_code(
 
 
 # ==================================================
-
-
-# experimental
-
-
-@torch.compile
-def dequant_4bit_blockwise(
-    A: torch.Tensor,
-    absmax: torch.Tensor,
-    blocksize: int,
-    code: torch.Tensor,
-    dtype: torch.dtype,
-    shape: Sequence[int],
-) -> torch.Tensor:
-    torch._check_is_size(blocksize)
-    torch._check(
-        dtype in [torch.bfloat16, torch.float16, torch.float32],
-        lambda: f"Blockwise 4bit dequantization only supports 16/32-bit floats, but got {dtype}",
-    )
-
-    # Enable non uint8 dtype
-    if A.dtype != torch.uint8:
-        A = A.view(torch.uint8)
-
-    A = A.reshape(-1)
-    # Map nf4 to [-1, 1]
-    out_dq = torch.empty(A.size(0) * 2, dtype=torch.int32, device=A.device)
-    n = out_dq.numel()
-    out_dq[1::2] = A & 0xF
-    out_dq[::2] = A >> 4
-    # code is fp32, cast to dtype to avoid the mismatch issue
-    code = code.to(dtype).to(A.device)
-    out_dq = code[out_dq]
-
-    # Apply scales
-    if out_dq.numel() != n:
-        assert out_dq.numel() == n + 1
-        out_dq = torch.narrow(out_dq, 0, 0, n)
-    blocks = n // blocksize
-    blocks += 1 if n % blocksize > 0 else 0
-    rem = n % blocksize
-    has_rem = rem > 0
-
-    out_l = torch.empty(shape, dtype=dtype, device=A.device).reshape(-1)
-    if has_rem:
-        out_l[: n - rem] = (out_dq[: n - rem].view(-1, blocksize) * absmax[: blocks - has_rem].view(-1, 1)).reshape(-1)
-        out_l[n - rem :] = out_dq[n - rem :] * absmax[-1]
-    else:
-        out_l = out_dq.view(-1, blocksize) * absmax.view(-1, 1)
-
-    out_l = out_l.reshape(-1, *shape[1:]).to(dtype)
-
-    return out_l
-
-
-@triton.jit
-def dequant_4bit_kernel_util(a, offsets, quant_ptr, absmax_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr):
-    PAIRED_QUANT_BLOCK = QUANT_BLOCK // 2
-    a = a.to(tl.uint8, bitcast=True)
-
-    # higher 4bits from uint8 packed tensor
-    higher = a & 0xF
-    # lower 4bits
-    lower = a >> 4
-
-    # apply conversion
-    higher_nf4 = tl.load(quant_ptr + higher)
-    # print("higher : ", higher_nf4)
-    lower_nf4 = tl.load(quant_ptr + lower)
-    # print("lower uint: ", lower)
-    # print("lower     : ", lower_nf4)
-
-    abs_blocks_lim = (
-        num_paired_elements // PAIRED_QUANT_BLOCK
-    ) * PAIRED_QUANT_BLOCK + num_paired_elements % PAIRED_QUANT_BLOCK
-    abs_offsets = offsets // PAIRED_QUANT_BLOCK
-    mask_blocked = offsets < abs_blocks_lim
-    absmax = tl.load(absmax_ptr + abs_offsets, mask_blocked)
-    # absmax = absmax.to(tl.float16)
-
-    # apply scales
-    mul_high = higher_nf4 * absmax
-    mul_low = lower_nf4 * absmax
-
-    out_dq = tl.interleave(mul_low, mul_high)
-    return out_dq
-
-
-SMALL_GRF = True
 
 
 # @triton.autotune(
@@ -920,11 +809,18 @@ def matmul_kernel(
         #     num_paired_elements,
         #     QUANT_BLOCK,
         # )
-        dq_b_t = dequant_4bit_body_util(a=a_blck, offsets=b_offsets, quant_ptr=quant_ptr, absmax_ptr=absmax_ptr,n_elems= num_paired_elements, QUANT_BLOCK=QUANT_BLOCK)
+        dq_b_t = dequant_4bit_body_util(
+            a=b_blck,
+            offsets=b_offsets,
+            quant_ptr=quant_ptr,
+            absmax_ptr=absmax_ptr,
+            n_elems=num_paired_elements,
+            QUANT_BLOCK=QUANT_BLOCK,
+        )
         # print("dq_b_t: ", dq_b_t)
         dq_b_t = dq_b_t.trans()
         # print(dq_b_t)
-        dq_b = dq_b_t.to(a_ptr.type.element_ty)
+        dq_b = dq_b_t.to(tl.float32)
         # dq_b = dq_b_t
 
         # We accumulate along the K dimension.
@@ -948,6 +844,97 @@ def matmul_kernel(
         order=(1, 0),
     )
     tl.store(c_block_ptr, c, boundary_check=(0, 1))
+
+
+
+# Common scenarion is A batched, B is just 2d
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+                      num_warps=32),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=3,
+                      num_warps=32),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+                      num_warps=32),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+                      num_warps=32),
+    ],
+    key=['M', 'N', 'K'],
+)
+@triton.jit
+def matmul_kernel_with_block_pointers_batched(
+        # Pointers to matrices
+        a_ptr, b_ptr, c_ptr,
+        # Matrix dimensions
+        B, M, N, K,
+        # The stride variables represent how much to increase the ptr by when moving by 1
+        # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
+        # by to get the element one row down (A has M rows).
+        stride_az, stride_am, stride_ak,  #
+        stride_bz, stride_bk, stride_bn,  #
+        stride_cz, stride_cm, stride_cn,  #
+        ACCUMULATOR_DTYPE: tl.constexpr,
+        # Meta-parameters
+        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr):
+    """Kernel for computing the matmul C = A x B.
+    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
+    """
+    # -----------------------------------------------------------
+    # Map program ids `pid` to the block of C it should compute.
+    # This is done in a grouped ordering to promote L2 data reuse.
+    # See the matrix multiplication tutorial for details.
+    bid = tl.program_id(axis=1)
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    offset_a = bid.to(tl.int64) * stride_az
+    offset_b = bid.to(tl.int64) * stride_bz
+    # ----------------------------------------------------------
+    # Create block pointers for the first blocks of A and B.
+    # We will advance this pointer as we move in the K direction and accumulate.
+    # See above `Make a Block Pointer` section for details.
+    a_block_ptr = tl.make_block_ptr(base=a_ptr + offset_a, shape=(M, K), strides=(stride_am, stride_ak),
+                                    offsets=(pid_m * BLOCK_SIZE_M, 0), block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
+                                    order=(1, 0))
+    b_block_ptr = tl.make_block_ptr(base=b_ptr + offset_b, shape=(K, N), strides=(stride_bk, stride_bn),
+                                    offsets=(0, pid_n * BLOCK_SIZE_N), block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N),
+                                    order=(1, 0))
+
+    # -----------------------------------------------------------
+    # Iterate to compute a block of the C matrix.
+    # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block.
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=ACCUMULATOR_DTYPE)
+    for k in range(0, K, BLOCK_SIZE_K):
+        # Load with boundary checks, no need to calculate the mask manually.
+        # For better performance, you may remove some axis from the boundary
+        # check, if you can guarantee that the access is always in-bound in
+        # that axis.
+        # See above `Load/Store a Block Pointer` section for details.
+        a = tl.load(a_block_ptr, boundary_check=(0, 1))
+        b = tl.load(b_block_ptr, boundary_check=(0, 1))
+        # We accumulate along the K dimension.
+        accumulator += tl.dot(a, b, out_dtype=ACCUMULATOR_DTYPE)
+        # Advance the block pointer to the next K block.
+        # See above `Advance a Block Pointer` section for details.
+        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
+    c = accumulator.to(c_ptr.type.element_ty)
+    # ----------------------------------------------------------------
+    # Write back the block of the output matrix C with boundary checks.
+    # See above `Load/Store a Block Pointer` section for details.
+    offset_c = bid.to(tl.int64) * stride_cz
+    c_block_ptr = tl.make_block_ptr(base=c_ptr + offset_c, shape=(M, N), strides=(stride_cm, stride_cn),
+                                    offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
+                                    block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1, 0))
+    tl.store(c_block_ptr, c, boundary_check=(0, 1))
+
 
 
 def matmul(a, b, shapeB, code, absmax, blocksize):
@@ -1274,7 +1261,7 @@ def matmul_kernel_persistent(
         if c_ptr.dtype.element_ty == tl.float8e4nv:
             c = accumulator.to(tl.float8e4nv)
         else:
-            c = accumulator.to(tl.float16)
+            c = accumulator.to(tl.float32)
         tl.store(c_ptrs, c, mask=c_mask)
 
 

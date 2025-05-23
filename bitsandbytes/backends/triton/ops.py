@@ -89,7 +89,9 @@ def quantize_4bit(
     absmax = torch.empty((blocks * 2,), device=A.device, dtype=A.dtype)
     out = torch.empty((n // 2, 1), device=A.device, dtype=torch.uint8)
 
-    triton_kernels.quantize_4bit_blockwise_triton(A, blocksize, quant_type, blocks, absmax, num_elements=n, quantized_out=out)
+    triton_kernels.quantize_4bit_blockwise_triton(
+        A, blocksize, quant_type, blocks, absmax, num_elements=n, quantized_out=out
+    )
     packed = out
 
     if quant_storage != torch.uint8:
@@ -150,6 +152,11 @@ def gemv_4bit(
     # if B.dtype != torch.uint8:
     #     B = B.squeeze().view(torch.uint8).unsqueeze(1)
 
+    # if B.dtype != torch.uint8:
+    #     B = B.squeeze().view(torch.uint8).unsqueeze(1)
+
+    # return triton_kernels.matmul(A, B, shapeB, code=code, absmax=absmax, blocksize=blocksize)
+
     # B_dq = torch.empty(shapeB, dtype=A.dtype, device=A.device)
     # triton_kernels._dequantize_4bit_impl_passing_code(
     #     B,
@@ -159,8 +166,20 @@ def gemv_4bit(
     #     dtype=A.dtype,
     #     out=B_dq,
     # )
-    quant_type = "fp4" if code[1] > 0 else "nf4"
-    B_dq_triton = dequantize_4bit(B, absmax, blocksize, quant_type, shapeB, A.dtype)
+    # quant_type = "fp4" if code[1] > 0 else "nf4"
+    # B_dq_triton = dequantize_4bit(B, absmax, blocksize, quant_type, shapeB, A.dtype)
+    if B.dtype != torch.uint8:
+        B = B.squeeze().view(torch.uint8).unsqueeze(1)
+    B_dq_triton = torch.empty(shapeB, dtype=A.dtype, device=A.device)
+
+    triton_kernels._dequantize_4bit_impl_passing_code(
+        B,
+        absmax,
+        blocksize,
+        code,
+        dtype=A.dtype,
+        out=B_dq_triton,
+    )
 
     # For some reason directly passing code causes errors in some cases like:
     # tests/test_functional.py::TestQuantize4BitFunctional::test_gemv_4bit[dim=128-uint8-fp32-fc1-fp4-DQ_True-xpu]
@@ -175,6 +194,7 @@ def gemv_4bit(
     #     dtype=A.dtype,
     #     out=B_dq_triton,
     # )
+    # return triton_kernels.matmul_persistent(A, B_dq_triton.T)
 
     return torch.nn.functional.linear(
         A,
