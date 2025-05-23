@@ -684,30 +684,34 @@ def _dequantize_4bit_impl_passing_code(
 # ==================================================
 
 
-# @triton.autotune(
-#     configs=[
-#         triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'small'}, num_warps = 64, num_stages = 2),
-#     ],
-#     #     triton.Config(
-#     #         {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-#     #         num_stages=s, num_warps=32) for s in [1, 2, 3]
-#     # ] + [
-#     #     triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': m},
-#     #                   num_stages=s, num_warps=w)
-#     #     for s in [2, 3, 4]
-#     #     for (m, w) in ([('large', 32), ('small', 64)] if SMALL_GRF else [('large', 32)])
-#     # ] + [
-#     #     triton.Config(
-#     #         {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-#     #         num_stages=s, num_warps=32) for s in [2]
-#     # ] + [
-#     #     triton.Config({'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 512, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'grf_mode': m},
-#     #                   num_stages=s, num_warps=w)
-#     #     for s in [2, 3]
-#     #     for (m, w) in ([('large', 32), ('small', 64)] if SMALL_GRF else [('large', 32)])
-#     # ],
-#     key=['M', 'N', 'K'],
-# )
+@triton.autotune(
+    configs=[
+        # # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+        # #               num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}, num_stages=2,
+        # #               num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4}, num_stages=2,
+        # #               num_warps=32),
+        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}),
+        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4}),
+        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 4}),
+        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}, num_stages=2,
+        #               num_warps=32),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4}, num_stages=2,
+                      num_warps=32),
+        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 4}, num_stages=2,
+        #               num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+        # #               num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=3,
+        # #               num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+        # #               num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+        # #               num_warps=32),
+    ],
+    key=['M', 'N', 'K'],
+)
 @triton.jit
 def matmul_kernel(
     # Pointers to matrices
@@ -721,15 +725,19 @@ def matmul_kernel(
     # The stride variables represent how much to increase the ptr by when moving by 1
     # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
     # by to get the element one row down (A has M rows).
+    stride_az,
     stride_am,
     stride_ak,
+    stride_bz,
     stride_bn,
     stride_bk,
+    stride_cz,
     stride_cm,
     stride_cn,
     quant_ptr,
     absmax_ptr,
     num_paired_elements,
+    ACCUMULATOR_DTYPE: tl.constexpr,
     QUANT_BLOCK: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
@@ -745,6 +753,7 @@ def matmul_kernel(
     # This is done in a grouped ordering to promote L2 data reuse.
     # See above `L2 Cache Optimizations` section for details.
     pid = tl.program_id(axis=0)
+    bid = tl.program_id(axis=1)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -754,6 +763,8 @@ def matmul_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
+    offset_a = bid.to(tl.int64) * stride_az
+    offset_b = bid.to(tl.int64) * stride_bz
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
     # We will advance this pointer as we move in the K direction
@@ -770,7 +781,7 @@ def matmul_kernel(
     b_offsets = offs_bn[:, None] * stride_bn + offs_bk[None, :] * stride_bk
 
     a_block_ptr = tl.make_block_ptr(
-        base=a_ptr,
+        base=a_ptr + offset_a,
         shape=(M, K),
         strides=(stride_am, stride_ak),
         offsets=(pid_m * BLOCK_SIZE_M, 0),
@@ -778,7 +789,7 @@ def matmul_kernel(
         order=(1, 0),
     )
     b_block_ptr = tl.make_block_ptr(
-        base=b_ptr,
+        base=b_ptr + offset_b,
         shape=(N, K // 2),
         strides=(stride_bn, stride_bk),
         offsets=(pid_n * BLOCK_SIZE_N, 0),
@@ -786,7 +797,7 @@ def matmul_kernel(
         order=(1, 0),
     )
 
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=ACCUMULATOR_DTYPE)
     # dq_b = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_N), dtype=a_ptr.type.element_ty)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # b_ptrs = b_ptr + b_offsets
@@ -817,26 +828,24 @@ def matmul_kernel(
             n_elems=num_paired_elements,
             QUANT_BLOCK=QUANT_BLOCK,
         )
-        # print("dq_b_t: ", dq_b_t)
         dq_b_t = dq_b_t.trans()
-        # print(dq_b_t)
-        dq_b = dq_b_t.to(tl.float32)
+        dq_b = dq_b_t.to(a_ptr.type.element_ty)
         # dq_b = dq_b_t
 
         # We accumulate along the K dimension.
-        accumulator += tl.dot(a_blck, dq_b, out_dtype=tl.float32)
+        accumulator += tl.dot(a_blck, dq_b, out_dtype=ACCUMULATOR_DTYPE)
         # Advance the ptrs to the next K block.
         # a_ptrs += BLOCK_SIZE_K * stride_ak
         b_offsets += (BLOCK_SIZE_K // 2) * stride_bk
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
         b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_K // 2))
-    # c = accumulator.to(a_ptr.type.element_ty)
     c = accumulator.to(c_ptr.type.element_ty)
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
+    offset_c = bid.to(tl.int64) * stride_cz
     c_block_ptr = tl.make_block_ptr(
-        base=c_ptr,
+        base=c_ptr + offset_c,
         shape=(M, N),
         strides=(stride_cm, stride_cn),
         offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
@@ -848,145 +857,81 @@ def matmul_kernel(
 
 
 # Common scenarion is A batched, B is just 2d
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
-                      num_warps=32),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=3,
-                      num_warps=32),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
-                      num_warps=32),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
-                      num_warps=32),
-    ],
-    key=['M', 'N', 'K'],
-)
-@triton.jit
-def matmul_kernel_with_block_pointers_batched(
-        # Pointers to matrices
-        a_ptr, b_ptr, c_ptr,
-        # Matrix dimensions
-        B, M, N, K,
-        # The stride variables represent how much to increase the ptr by when moving by 1
-        # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
-        # by to get the element one row down (A has M rows).
-        stride_az, stride_am, stride_ak,  #
-        stride_bz, stride_bk, stride_bn,  #
-        stride_cz, stride_cm, stride_cn,  #
-        ACCUMULATOR_DTYPE: tl.constexpr,
-        # Meta-parameters
-        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr):
-    """Kernel for computing the matmul C = A x B.
-    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
-    """
-    # -----------------------------------------------------------
-    # Map program ids `pid` to the block of C it should compute.
-    # This is done in a grouped ordering to promote L2 data reuse.
-    # See the matrix multiplication tutorial for details.
-    bid = tl.program_id(axis=1)
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
-
-    offset_a = bid.to(tl.int64) * stride_az
-    offset_b = bid.to(tl.int64) * stride_bz
-    # ----------------------------------------------------------
-    # Create block pointers for the first blocks of A and B.
-    # We will advance this pointer as we move in the K direction and accumulate.
-    # See above `Make a Block Pointer` section for details.
-    a_block_ptr = tl.make_block_ptr(base=a_ptr + offset_a, shape=(M, K), strides=(stride_am, stride_ak),
-                                    offsets=(pid_m * BLOCK_SIZE_M, 0), block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
-                                    order=(1, 0))
-    b_block_ptr = tl.make_block_ptr(base=b_ptr + offset_b, shape=(K, N), strides=(stride_bk, stride_bn),
-                                    offsets=(0, pid_n * BLOCK_SIZE_N), block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N),
-                                    order=(1, 0))
-
-    # -----------------------------------------------------------
-    # Iterate to compute a block of the C matrix.
-    # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block.
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=ACCUMULATOR_DTYPE)
-    for k in range(0, K, BLOCK_SIZE_K):
-        # Load with boundary checks, no need to calculate the mask manually.
-        # For better performance, you may remove some axis from the boundary
-        # check, if you can guarantee that the access is always in-bound in
-        # that axis.
-        # See above `Load/Store a Block Pointer` section for details.
-        a = tl.load(a_block_ptr, boundary_check=(0, 1))
-        b = tl.load(b_block_ptr, boundary_check=(0, 1))
-        # We accumulate along the K dimension.
-        accumulator += tl.dot(a, b, out_dtype=ACCUMULATOR_DTYPE)
-        # Advance the block pointer to the next K block.
-        # See above `Advance a Block Pointer` section for details.
-        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
-        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
-    c = accumulator.to(c_ptr.type.element_ty)
-    # ----------------------------------------------------------------
-    # Write back the block of the output matrix C with boundary checks.
-    # See above `Load/Store a Block Pointer` section for details.
-    offset_c = bid.to(tl.int64) * stride_cz
-    c_block_ptr = tl.make_block_ptr(base=c_ptr + offset_c, shape=(M, N), strides=(stride_cm, stride_cn),
-                                    offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
-                                    block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1, 0))
-    tl.store(c_block_ptr, c, boundary_check=(0, 1))
-
-
-
 def matmul(a, b, shapeB, code, absmax, blocksize):
     # Check constraints.
     # assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     assert a.is_contiguous(), "Matrix A must be contiguous"
-    M, K = a.shape
-    N, K = shapeB
+    if len(a.shape) == 1:
+        B = M = 1
+        K = a.shape
+        stride_az, stride_am, stride_ak = a.numel(), a.numel(), a.stride(0)
+    elif len(a.shape) == 2:
+        B = 1
+        M, K = a.shape
+        stride_az, stride_am, stride_ak = a.numel(), a.stride(0), a.stride(1)
+    elif len(a.shape) == 3:
+        B, M, K = a.shape
+        stride_az, stride_am, stride_ak = a.stride(0), a.stride(1), a.stride(2)
+    elif len(a.shape) > 3:
+        a = a.view(-1, a.shape[-2], a.shape[-1])
+        B, M, K = a.shape
+        stride_az, stride_am, stride_ak = a.stride(0), a.stride(1), a.stride(2)
 
-    # b_padded = torch.zeros((N, K//2 + K%2), device=a.device, dtype=torch.uint8)
-    # if b.numel() % b_padded.numel() != 0:
-    #     b_padded = b_padded.view(-1)
-    #     b_padded[:b.numel()] = b.view(-1)
-    #     b_padded = b_padded.view(N, K//2 + K%2)
-    # b = b_padded
-    # print("b shape: ", b.shape, " K + rest: ", K//2 + K%2)
-    b = b.view(N, K // 2)
-    # b = b.to(torch.uint8)
-    # print("b: ", b.shape)
-    # print("a.dtype: ",  a.dtype)
-    # print("b.dtype: ",  a.dtype)
+    if len(shapeB) == len(a.shape) == 3:
+        assert shapeB[0] == B, "Incompatible batch size"
+        assert shapeB[1] == K, "Incompatible dimensions"
+        B, N, K = shapeB
+        stride_bz, stride_bn, stride_bk = N*K//2, K//2, 1
+        c = torch.empty((B, M, N), device=a.device, dtype=a.dtype)
 
-    BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, GROUP_SIZE_M = 16, 16, 16, 4
+    if len(shapeB) == 2:
+        N, K = shapeB
+        b = b.view(N, K // 2)
+        stride_bz, stride_bn, stride_bk = N*K//2, K//2, 1
+        if len(a.shape) >= 3:
+            c = torch.empty((B, M, N), device=a.device, dtype=a.dtype)
+            stride_cz, stride_cm, stride_cn = c.stride(0), c.stride(1), c.stride(2)
+        else:
+            c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+            stride_cz, stride_cm, stride_cn = c.numel(), c.stride(0), c.stride(1)
+
+    # print("matmul params: ", B, " ", M, " ", N, " ", K)
+    # print("strides: ", stride_bz, " ", stride_bn, " ", stride_bk)
+    # print("b strides: ", b.stride(0), " ", b.stride(1))
+
+    # BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, GROUP_SIZE_M = 16, 16, 16, 4
     # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+    # c = torch.empty((B, M, N), device=a.device, dtype=a.dtype)
     # 1D launch kernel where each block gets its own program.
-    grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
+    # grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),B, )
+    grid = lambda META: (
+            triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+            B,
+        )
+    accum_dtype = a.dtype
+    if a.dtype in (torch.bfloat16, torch.float16):
+        accum_dtype = torch.float32
+
+    triton_accum_dtype = tl.dtype(str(accum_dtype)[6:].replace("bfloat", "bf").replace("float", "fp"))
     # grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
     # print("grid: M - ", triton.cdiv(M, BLOCK_SIZE_M), " N - ", triton.cdiv(N, BLOCK_SIZE_N))
     # print("state code: ", code)
     number_of_paired_elements = b.numel()
     matmul_kernel[grid](
-        a,
-        b,
-        c,
-        M,
-        N,
-        K,
-        a.stride(0),
-        a.stride(1),  #
-        b.stride(0),
-        b.stride(1),  #
-        c.stride(0),
-        c.stride(1),  #
+        a, b, c, # tensors
+        M, N, K, # sizes
+        stride_az, stride_am, stride_ak,  #
+        stride_bz, stride_bn, stride_bk,  #
+        stride_cz, stride_cm, stride_cn,  #
         code,
         absmax,
         number_of_paired_elements,
+        triton_accum_dtype,
         blocksize,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_K,  #
-        GROUP_SIZE_M,
+        # BLOCK_SIZE_M,
+        # BLOCK_SIZE_N,
+        # BLOCK_SIZE_K,  #
+        # GROUP_SIZE_M,
     )
     return c
 
