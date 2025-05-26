@@ -210,4 +210,3 @@ def gemv_4bit_with_quant_type(
         B = B.squeeze().view(torch.uint8).unsqueeze(1)
 
     return triton_kernels.matmul_quant_typed(A, B, shapeB, quant_type=quant_type, absmax=absmax, blocksize=blocksize)
-

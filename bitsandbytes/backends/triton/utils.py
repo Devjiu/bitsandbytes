@@ -1,5 +1,3 @@
-import torch
-
 import math
 import statistics
 
@@ -10,6 +8,7 @@ from bitsandbytes.functional import get_4bit_type
 # Should be the same for quant/dequant
 _FP4_QUANT_TABLE = get_4bit_type("fp4", device="xpu")
 _NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
+
 
 def _quantile(a, q):
     n = len(a)
@@ -80,6 +79,7 @@ def measure_gpu(fn, *args):
     times = [s.elapsed_time(e) for s, e in zip(start_event, end_event)]
     times_med = _summarize_statistics(times, None, "median")
     return times_med
+
 
 # # Should be sorted to use binary search
 # _NF4_QUANT_TABLE = torch.tensor(

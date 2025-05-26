@@ -340,60 +340,28 @@ def quantize_nf4_blockwise_kernel(
             A_normalized > 0.3893125355243683,
             tl.where(
                 A_normalized > 0.6427869200706482,
-                tl.where(
-                    A_normalized > 0.8614784181118011,
-                    0b1111,
-                    0b1110
-                ),
-                tl.where(
-                    A_normalized > 0.5016634166240692,
-                    0b1101,
-                    0b1100
-                )
+                tl.where(A_normalized > 0.8614784181118011, 0b1111, 0b1110),
+                tl.where(A_normalized > 0.5016634166240692, 0b1101, 0b1100),
             ),
             tl.where(
                 A_normalized > 0.2035212516784668,
-                tl.where(
-                    A_normalized > 0.2920137718319893,
-                    0b1011,
-                    0b1010
-                ),
-                tl.where(
-                    A_normalized > 0.1202552504837513,
-                    0b1001,
-                    0b1000
-                )
+                tl.where(A_normalized > 0.2920137718319893, 0b1011, 0b1010),
+                tl.where(A_normalized > 0.1202552504837513, 0b1001, 0b1000),
             ),
         ),
         tl.where(
             A_normalized > -0.33967943489551544,
             tl.where(
                 A_normalized > -0.13791173323988914,
-                tl.where(
-                    A_normalized > -0.045525018125772476,
-                    0b0111,
-                    0b0110
-                ),
-                tl.where(
-                    A_normalized > -0.23460740596055984,
-                    0b0101,
-                    0b0100
-                )
+                tl.where(A_normalized > -0.045525018125772476, 0b0111, 0b0110),
+                tl.where(A_normalized > -0.23460740596055984, 0b0101, 0b0100),
             ),
             tl.where(
                 A_normalized > -0.6106329262256622,
-                tl.where(
-                    A_normalized > -0.4599952697753906,
-                    0b0011,
-                    0b0010
-                ),
-                tl.where(
-                    A_normalized > -0.8480964004993439,
-                    0b0001,
-                    0b0000
-                )
+                tl.where(A_normalized > -0.4599952697753906, 0b0011, 0b0010),
+                tl.where(A_normalized > -0.8480964004993439, 0b0001, 0b0000),
             ),
-        )
+        ),
     )
     quantized = result.to(tl.uint8)
 
@@ -474,29 +442,31 @@ def dequant_4bit_body_util(a, offsets, quant_ptr, absmax_ptr, n_elems, QUANT_BLO
     out_dq = tl.interleave(mul_low, mul_high)
     return out_dq
 
+
 @triton.jit
 def ddequantize_fp4_tree(val, absmax):
     # val: tl.tensor (uint8)
     # absmax: tl.tensor (float32/float16)
     #  00001100  00001011  00001001  00001111
-    sign = tl.where((val & 0b1000) == 0b1000, -1.0, 1.0) # -1
+    sign = tl.where((val & 0b1000) == 0b1000, -1.0, 1.0)  # -1
     third_bit = (val & 0b0100) == 0b0100  # True
-    second_bit = (val & 0b0010) == 0b0010 # False
-    first_bit = (val & 0b0001) == 0b0001 # False
+    second_bit = (val & 0b0010) == 0b0010  # False
+    first_bit = (val & 0b0001) == 0b0001  # False
 
     branch1 = tl.where(
         second_bit,
         tl.where(first_bit, 0.25, 0.16666667),  # 1111, 1110
-        tl.where(first_bit, 0.5, 0.33333333),   # 1101, 1100
+        tl.where(first_bit, 0.5, 0.33333333),  # 1101, 1100
     )
     branch2 = tl.where(
         second_bit,
-        tl.where(first_bit, 1.0, 0.66666667),   # 1011, 1010
-        tl.where(first_bit, 0.00520833, 0.0),   # 1001, 1000
+        tl.where(first_bit, 1.0, 0.66666667),  # 1011, 1010
+        tl.where(first_bit, 0.00520833, 0.0),  # 1001, 1000
     )
     out = tl.where(third_bit, branch1, branch2)
     # print("tree out: ", out)
     return out * sign * absmax
+
 
 @triton.jit
 def dequant_fp4_body_util(a, offsets, absmax_ptr, n_elems, QUANT_BLOCK: tl.constexpr):
@@ -511,6 +481,7 @@ def dequant_fp4_body_util(a, offsets, absmax_ptr, n_elems, QUANT_BLOCK: tl.const
     mul_low = ddequantize_fp4_tree(lower, absmax)
     out_dq = tl.interleave(mul_low, mul_high)
     return out_dq
+
 
 @triton.jit
 def ddequantize_nf4_tree(val):
@@ -551,6 +522,7 @@ def ddequantize_nf4_tree(val):
     )
     return tl.where(cond0, branch_pos, branch_neg)
 
+
 @triton.jit
 def dequant_nf4_body_util(a, offsets, absmax_ptr, n_elems, QUANT_BLOCK: tl.constexpr):
     PAIRED_QUANT_BLOCK: tl.constexpr = QUANT_BLOCK // 2
@@ -565,6 +537,7 @@ def dequant_nf4_body_util(a, offsets, absmax_ptr, n_elems, QUANT_BLOCK: tl.const
     mul_low = ddequantize_nf4_tree(lower) * absmax
     out_dq = tl.interleave(mul_low, mul_high)
     return out_dq
+
 
 # @triton.autotune(
 #     configs=[
@@ -623,6 +596,7 @@ def dequant_4bit_kernel(
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
 
+
 @triton.jit
 def dequant_fp4_kernel(
     a_ptr, c_ptr, absmax_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr
@@ -648,6 +622,7 @@ def dequant_fp4_kernel(
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
 
+
 @triton.jit
 def dequant_nf4_kernel(
     a_ptr, c_ptr, absmax_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr
@@ -672,6 +647,7 @@ def dequant_nf4_kernel(
     offs = out_block_start + tl.arange(0, SPLIT_SIZE * 2)
     mask = offs < num_paired_elements * 2
     tl.store(c_ptr + offs, out_dq, mask)
+
 
 def _dequantize_4bit_impl(
     A: torch.Tensor,
@@ -1158,7 +1134,7 @@ def matmul_quant_typed(a, b, shapeB, quant_type, absmax, blocksize):
         number_of_paired_elements,
         triton_accum_dtype,
         blocksize,
-        IS_FP4=flag
+        IS_FP4=flag,
         # BLOCK_SIZE_M,
         # BLOCK_SIZE_N,
         # BLOCK_SIZE_K,  #
