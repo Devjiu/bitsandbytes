@@ -148,6 +148,8 @@ def gemv_4bit(
     if B.dtype != torch.uint8:
         B = B.squeeze().view(torch.uint8).unsqueeze(1)
 
+    return triton_kernels.matmul(A, B, shapeB, code=code, absmax=absmax, blocksize=blocksize)
+
     B_dq_triton = torch.empty(shapeB, dtype=A.dtype, device=A.device)
 
     triton_kernels._dequantize_4bit_impl_passing_code(
