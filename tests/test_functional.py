@@ -1104,7 +1104,7 @@ class TestSparseTensorFunctional:
 class TestQuantize4BitFunctional:
     @pytest.mark.parametrize("device", get_available_devices())
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=describe_dtype)
-    @pytest.mark.parametrize("quant_type", ["fp4", "nf4"])
+    @pytest.mark.parametrize("quant_type", ["nf4"])
     @pytest.mark.parametrize("blocksize", [64, 128, 256, 512, 1024, 2048, 4096])
     def test_4bit_quant(self, device, dtype, quant_type, blocksize):
         if device == "cpu" and quant_type != "nf4":

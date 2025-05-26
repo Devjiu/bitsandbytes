@@ -2,10 +2,7 @@ from collections.abc import Sequence
 
 import torch
 
-from bitsandbytes.functional import get_4bit_type
-
-_FP4_QUANT_TABLE = get_4bit_type("fp4", device="xpu")
-_NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
+# from .utils import _FP4_QUANT_TABLE, _NF4_QUANT_TABLE
 
 try:
     from . import triton_kernels
@@ -199,3 +196,18 @@ def gemv_4bit(
         bias=None,
     )
     # return c_mm_ref
+
+
+def gemv_4bit_with_quant_type(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    shapeB: Sequence[int],
+    absmax: torch.Tensor,
+    quant_type: str,
+    blocksize: int,
+) -> torch.Tensor:
+    if B.dtype != torch.uint8:
+        B = B.squeeze().view(torch.uint8).unsqueeze(1)
+
+    return triton_kernels.matmul_quant_typed(A, B, shapeB, quant_type=quant_type, absmax=absmax, blocksize=blocksize)
+
