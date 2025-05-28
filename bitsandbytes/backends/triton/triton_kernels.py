@@ -2,7 +2,9 @@ import torch
 
 import triton
 import triton.language as tl
-
+from bitsandbytes.functional import get_4bit_type
+_FP4_QUANT_TABLE = get_4bit_type("fp4", device="xpu")
+_NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
 
 # @triton.autotune(
 #     configs=[
@@ -359,6 +361,30 @@ def dequant_4bit_body_util(a, offsets, quant_ptr, absmax_ptr, n_elems, QUANT_BLO
     return out_dq
 
 
+@triton.jit
+def dequant_4bit_body_util_gather(a, offsets, code, absmax_ptr, n_elems, SPLIT_SIZE: tl.constexpr, QUANT_BLOCK: tl.constexpr):
+    PAIRED_QUANT_BLOCK: tl.constexpr = QUANT_BLOCK // 2
+    mask = offsets < n_elems
+    higher = a & 0xF
+    # lower 4bits
+    lower = a >> 4
+
+    abs_offsets = offsets // PAIRED_QUANT_BLOCK
+    absmax = tl.load(absmax_ptr + abs_offsets, mask=mask, other=1.0, eviction_policy="evict_last")
+
+    # code shape num subgroups x code_size
+    called_lower = tl.gather(code, lower, axis=1)
+    called_higher = tl.gather(code, higher, axis=1)
+    # lower_4 = tl.load(quant_ptr + lower, eviction_policy="evict_last")
+    # higher_4 = tl.load(quant_ptr + higher, eviction_policy="evict_last")
+    lower_4 = called_lower.reshape(SPLIT_SIZE)
+    higher_4 = called_higher.reshape(SPLIT_SIZE)
+
+    mul_low = lower_4 * absmax
+    mul_high = higher_4 * absmax
+    out_dq = tl.interleave(mul_low, mul_high)
+    return out_dq
+
 # Triton implementation of similar CUDA kernel to avoid loading code from csrc/kernels.cu::dDequantizeFP4Tree
 @triton.jit
 def dequantize_fp4_tree(val, absmax):
@@ -459,7 +485,7 @@ def dequant_nf4_body_util(a, offsets, absmax_ptr, n_elems, QUANT_BLOCK: tl.const
 # All such kernels are similar, so maybe code can be generalised.
 # @triton.autotune(
 #     configs=[
-# #         # triton.Config({'SPLIT_SIZE': 64}),
+#         triton.Config({'SPLIT_SIZE': 64}),
 # #         # # triton.Config({'SPLIT_SIZE': 64, 'grf_mode': 'large'}, num_stages=2, num_warps=32),
 # #         # # triton.Config({'SPLIT_SIZE': 64, 'grf_mode': 'auto'}, num_stages=2, num_warps=32),
 # #         # # triton.Config({'SPLIT_SIZE': 64, 'grf_mode': 'large'}, num_stages=4, num_warps=32),
@@ -508,6 +534,59 @@ def dequant_4bit_kernel(
         n_elems=num_paired_elements,
         QUANT_BLOCK=QUANT_BLOCK,
     )
+
+    out_block_start = pid * SPLIT_SIZE * 2
+    offs = out_block_start + tl.arange(0, SPLIT_SIZE * 2)
+    mask = offs < num_paired_elements * 2
+    tl.store(c_ptr + offs, out_dq, mask)
+
+# @triton.autotune(
+#     configs=[
+#         triton.Config({'SPLIT_SIZE': 64}),
+#         triton.Config({'SPLIT_SIZE': 128}),
+#         triton.Config({'SPLIT_SIZE': 128}, num_warps = 32, num_stages = 2),
+#         triton.Config({'SPLIT_SIZE': 256}),
+#         triton.Config({'SPLIT_SIZE': 256}, num_warps = 32, num_stages = 2),
+#         triton.Config({'SPLIT_SIZE': 512}),
+#         triton.Config({'SPLIT_SIZE': 512}, num_warps = 32, num_stages = 2),
+#     ],
+#     key=['num_paired_elements'],
+# )
+@triton.jit
+def dequant_4bit_kernel_gather(
+    a_ptr, c_ptr, quant_ptr, absmax_ptr, num_paired_elements, QUANT_BLOCK: tl.constexpr, SPLIT_SIZE: tl.constexpr
+):
+    pid = tl.program_id(axis=0)  # We use a 1D launch grid so axis is 0.
+    block_start = pid * SPLIT_SIZE
+    subgroup_size: tl.constexpr = 16
+    num_groups: tl.constexpr = SPLIT_SIZE // subgroup_size
+
+    offsets = block_start + tl.arange(0, SPLIT_SIZE)
+    mask = offsets < num_paired_elements
+
+    # 2D offsets: shape [num_groups, 32]
+    # group_idx = tl.arange(0, num_groups)[:, None]      # shape [num_groups, 1]
+    # elem_idx = tl.arange(0, 32)[None, :]               # shape [1, 32]
+    # offsets_2d = block_start + group_idx * 32 + elem_idx  # shape [num_groups, 32]
+    # # print("offsets_2d: ", offsets_2d.shape, " ", offsets_2d)
+    # mask = offsets_2d < num_paired_elements
+
+    a = tl.load(a_ptr + offsets, mask, eviction_policy="evict_first")
+    a = a.reshape(num_groups, subgroup_size)
+    subgroup_id = tl.arange(0, num_groups)[:, None] * 0  # shape [num_groups, 1]
+    code = tl.load(quant_ptr + subgroup_id + tl.arange(0, 16)[None, :])
+
+    out_dq = dequant_4bit_body_util_gather(
+        a=a,
+        offsets=offsets,
+        code=code,
+        absmax_ptr=absmax_ptr,
+        n_elems=num_paired_elements,
+        SPLIT_SIZE=SPLIT_SIZE,
+        QUANT_BLOCK=QUANT_BLOCK,
+    )
+
+    out_dq = out_dq.reshape(SPLIT_SIZE * 2)
 
     out_block_start = pid * SPLIT_SIZE * 2
     offs = out_block_start + tl.arange(0, SPLIT_SIZE * 2)
@@ -606,9 +685,37 @@ def _dequantize_4bit_impl(
     # grid = lambda META: (triton.cdiv(number_of_paired_elements, META['SPLIT_SIZE']), )
     grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
     if quant_type == "fp4":
-        dequant_fp4_kernel[grid](A, out, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
+        # dequant_fp4_kernel[grid](A, out, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
+        dequant_4bit_kernel[grid](A, out, _FP4_QUANT_TABLE, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
     else:
-        dequant_nf4_kernel[grid](A, out, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
+        # dequant_nf4_kernel[grid](A, out, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
+        dequant_4bit_kernel[grid](A, out, _NF4_QUANT_TABLE, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
+
+
+def _dequantize_4bit_gather(
+    A: torch.Tensor,
+    absmax: torch.Tensor,
+    blocksize: int,
+    quant_type: str,
+    dtype: torch.dtype,
+    out: torch.Tensor,
+) -> None:
+    # It's will be processed as an array, so
+    # actual length is row * col
+    # Elements are in uint8 format, so interleaved
+    # so total amount of data is 2 * elem_count
+    number_of_paired_elements = A.numel()
+    # we assume that split_size > quant_blocksize
+
+    SPLIT_SIZE = 128
+    # grid = lambda META: (triton.cdiv(number_of_paired_elements, META['SPLIT_SIZE']), )
+    grid = (triton.cdiv(number_of_paired_elements, SPLIT_SIZE),)
+    if quant_type == "fp4":
+        # dequant_fp4_kernel[grid](A, out, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
+        dequant_4bit_kernel_gather[grid](A, out, _FP4_QUANT_TABLE, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
+    else:
+        # dequant_nf4_kernel[grid](A, out, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
+        dequant_4bit_kernel_gather[grid](A, out, _NF4_QUANT_TABLE, absmax, number_of_paired_elements, blocksize, SPLIT_SIZE)
 
 
 def _dequantize_4bit_impl_passing_code(
@@ -1079,6 +1186,208 @@ def matmul_quant_typed(a, b, shapeB, quant_type, absmax, blocksize):
     )
     return c
 
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+                      num_warps=32),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}, num_stages=2,
+                      num_warps=32),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4}, num_stages=2,
+                      num_warps=32),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4}),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 4}),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}, num_stages=2,
+                      num_warps=32),
+        triton.Config(
+            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 4},
+            num_stages=2,
+            num_warps=32,
+        ),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4}, num_stages=2,
+                      num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+        # #               num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=3,
+        # #               num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+        # #               num_warps=32),
+        # # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=2,
+        # #               num_warps=32),
+    ],
+    key=["M", "N", "K"],
+)
+@triton.jit
+def matmul_kernel_straight(
+    # Pointers to matrices
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    # Matrix dimensions
+    M,
+    N,
+    K,
+    # The stride variables represent how much to increase the ptr by when moving by 1
+    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
+    # by to get the element one row down (A has M rows).
+    stride_az,
+    stride_am,
+    stride_ak,
+    stride_bz,
+    stride_bn,
+    stride_bk,
+    stride_cz,
+    stride_cm,
+    stride_cn,
+    ACCUMULATOR_DTYPE: tl.constexpr,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,  #
+    GROUP_SIZE_M: tl.constexpr,  #
+):
+    """Kernel for computing the matmul C = A x B.
+    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
+    """
+    # -----------------------------------------------------------
+    # Map program ids `pid` to the block of C it should compute.
+    # This is done in a grouped ordering to promote L2 data reuse.
+    # See above `L2 Cache Optimizations` section for details.
+    pid = tl.program_id(axis=0)
+    bid = tl.program_id(axis=1)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    offset_a = bid.to(tl.int64) * stride_az
+    offset_b = bid.to(tl.int64) * stride_bz
+    # ----------------------------------------------------------
+    # Create pointers for the first blocks of A and B.
+    # We will advance this pointer as we move in the K direction
+    # and accumulate
+    # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
+    # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
+
+    a_block_ptr = tl.make_block_ptr(
+        base=a_ptr + offset_a,
+        shape=(M, K),
+        strides=(stride_am, stride_ak),
+        offsets=(pid_m * BLOCK_SIZE_M, 0),
+        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
+        order=(1, 0),
+    )
+    b_block_ptr = tl.make_block_ptr(base=b_ptr + offset_b, shape=(K, N), strides=(stride_bk, stride_bn),
+                                offsets=(0, pid_n * BLOCK_SIZE_N), block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N),
+                                order=(1, 0))
+
+
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=ACCUMULATOR_DTYPE)
+    # dq_b = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_N), dtype=a_ptr.type.element_ty)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        # Load the next block of A and B, generate a mask by checking the K dimension.
+        # If it is out of bounds, set it to 0.
+        a = tl.load(a_block_ptr, boundary_check=(0, 1))
+        b = tl.load(b_block_ptr, boundary_check=(0, 1))
+
+        # We accumulate along the K dimension.
+        accumulator += tl.dot(a, b, out_dtype=ACCUMULATOR_DTYPE)
+        # Advance the ptrs to the next K block.
+        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
+    c = accumulator.to(c_ptr.type.element_ty)
+
+    # -----------------------------------------------------------
+    # Write back the block of the output matrix C with masks.
+    offset_c = bid.to(tl.int64) * stride_cz
+    c_block_ptr = tl.make_block_ptr(base=c_ptr + offset_c, shape=(M, N), strides=(stride_cm, stride_cn),
+                                    offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
+                                    block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1, 0))
+    tl.store(c_block_ptr, c, boundary_check=(0, 1))
+
+
+# Common scenario is A batched, B is just 2d
+def triton_matmul(a, b):
+    # Check constraints.
+    # assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+    assert a.is_contiguous(), "Matrix A must be contiguous"
+    if len(a.shape) == 1:
+        B = M = 1
+        K = a.shape
+        stride_az, stride_am, stride_ak = a.numel(), a.numel(), a.stride(0)
+    elif len(a.shape) == 2:
+        B = 1
+        M, K = a.shape
+        stride_az, stride_am, stride_ak = a.numel(), a.stride(0), a.stride(1)
+    elif len(a.shape) == 3:
+        B, M, K = a.shape
+        stride_az, stride_am, stride_ak = a.stride(0), a.stride(1), a.stride(2)
+    elif len(a.shape) > 3:
+        a = a.view(-1, a.shape[-2], a.shape[-1])
+        B, M, K = a.shape
+        stride_az, stride_am, stride_ak = a.stride(0), a.stride(1), a.stride(2)
+
+    if len(b.shape) == len(a.shape) == 3:
+        assert b.shape[0] == B, "Incompatible batch size"
+        assert b.shape[1] == K, "Incompatible dimensions"
+        B, K, N = b.shape
+        stride_bz, stride_bn, stride_bk = b.stride(0), b.stride(1), b.stride(2)
+        c = torch.empty((B, M, N), device=a.device, dtype=a.dtype)
+
+    if len(b.shape) == 2:
+        K, N = b.shape
+        # b = b.view(N, K // 2)
+        stride_bz, stride_bn, stride_bk = b.stride(0), b.stride(1), 1
+        if len(a.shape) >= 3:
+            c = torch.empty((B, M, N), device=a.device, dtype=a.dtype)
+            stride_cz, stride_cm, stride_cn = c.stride(0), c.stride(1), c.stride(2)
+        else:
+            c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+            stride_cz, stride_cm, stride_cn = c.numel(), c.stride(0), c.stride(1)
+
+    # BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, GROUP_SIZE_M = 16, 16, 16, 4
+    # Allocates output.
+    # c = torch.empty((B, M, N), device=a.device, dtype=a.dtype)
+    # 1D launch kernel where each block gets its own program.
+    # grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),B, )
+    grid = lambda META: (
+        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+        B,
+    )
+    accum_dtype = a.dtype
+    if a.dtype in (torch.bfloat16, torch.float16):
+        accum_dtype = torch.float32
+
+    triton_accum_dtype = tl.dtype(str(accum_dtype)[6:].replace("bfloat", "bf").replace("float", "fp"))
+    # grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    matmul_kernel_straight[grid](
+        a,
+        b,
+        c,  # tensors
+        M,
+        N,
+        K,  # sizes
+        stride_az,
+        stride_am,
+        stride_ak,  #
+        stride_bz,
+        stride_bn,
+        stride_bk,  #
+        stride_cz,
+        stride_cm,
+        stride_cn,  #
+        triton_accum_dtype,
+        # BLOCK_SIZE_M,
+        # BLOCK_SIZE_N,
+        # BLOCK_SIZE_K,  #
+        # GROUP_SIZE_M,
+    )
+    return c
+
 
 ######################### Fallback dequantization functions #########################
 ## for debug ##
@@ -1163,3 +1472,5 @@ def quantize_4bit_blockwise_kernel(
     out_offsets = block_start_idx * BLOCK_SIZE // 2 + tl.arange(0, SPLIT_NUM_BLOCKS * BLOCK_SIZE)
     out_mask = out_offsets < n_elements // 2
     tl.store(out_ptr + out_offsets, packed_flat, mask=out_mask)
+
+
