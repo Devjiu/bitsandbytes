@@ -377,11 +377,11 @@ def dequant_4bit_body_util_gather(a, offsets, code, absmax_ptr, n_elems, SPLIT_S
     called_higher = tl.gather(code, higher, axis=1)
     # lower_4 = tl.load(quant_ptr + lower, eviction_policy="evict_last")
     # higher_4 = tl.load(quant_ptr + higher, eviction_policy="evict_last")
-    lower_4 = called_lower.reshape(SPLIT_SIZE)
-    higher_4 = called_higher.reshape(SPLIT_SIZE)
+    # lower_4 = called_lower.reshape(SPLIT_SIZE)
+    # higher_4 = called_higher.reshape(SPLIT_SIZE)
 
-    mul_low = lower_4 * absmax
-    mul_high = higher_4 * absmax
+    mul_low = called_lower * absmax
+    mul_high = called_higher * absmax
     out_dq = tl.interleave(mul_low, mul_high)
     return out_dq
 
@@ -565,20 +565,20 @@ def dequant_4bit_kernel_gather(
     mask = offsets < num_paired_elements
 
     # 2D offsets: shape [num_groups, 32]
-    # group_idx = tl.arange(0, num_groups)[:, None]      # shape [num_groups, 1]
-    # elem_idx = tl.arange(0, 32)[None, :]               # shape [1, 32]
-    # offsets_2d = block_start + group_idx * 32 + elem_idx  # shape [num_groups, 32]
-    # # print("offsets_2d: ", offsets_2d.shape, " ", offsets_2d)
-    # mask = offsets_2d < num_paired_elements
+    group_idx = tl.arange(0, num_groups)[:, None]      # shape [num_groups, 1]
+    elem_idx = tl.arange(0, subgroup_size)[None, :]               # shape [1, subgroup_size]
+    offsets_2d = block_start + group_idx * subgroup_size + elem_idx  # shape [num_groups, subgroup_size]
+    # print("offsets_2d: ", offsets_2d.shape, " ", offsets_2d)
+    mask = offsets_2d < num_paired_elements
 
-    a = tl.load(a_ptr + offsets, mask, eviction_policy="evict_first")
-    a = a.reshape(num_groups, subgroup_size)
+    a = tl.load(a_ptr + offsets_2d, mask, eviction_policy="evict_first")
+    # a = a.reshape(num_groups, subgroup_size)
     subgroup_id = tl.arange(0, num_groups)[:, None] * 0  # shape [num_groups, 1]
     code = tl.load(quant_ptr + subgroup_id + tl.arange(0, 16)[None, :])
 
     out_dq = dequant_4bit_body_util_gather(
         a=a,
-        offsets=offsets,
+        offsets=offsets_2d,
         code=code,
         absmax_ptr=absmax_ptr,
         n_elems=num_paired_elements,
