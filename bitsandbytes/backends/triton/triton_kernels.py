@@ -2,9 +2,9 @@ import torch
 
 import triton
 import triton.language as tl
-from bitsandbytes.functional import get_4bit_type
-_FP4_QUANT_TABLE = get_4bit_type("fp4", device="xpu")
-_NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
+# from bitsandbytes.functional import get_4bit_type
+# _FP4_QUANT_TABLE = get_4bit_type("fp4", device="xpu")
+# _NF4_QUANT_TABLE = get_4bit_type("nf4", device="xpu")
 
 # @triton.autotune(
 #     configs=[
@@ -1473,4 +1473,283 @@ def quantize_4bit_blockwise_kernel(
     out_mask = out_offsets < n_elements // 2
     tl.store(out_ptr + out_offsets, packed_flat, mask=out_mask)
 
+@triton.jit
+def dequant_8bit_kernel_util(
+    a,
+    offsets,
+    quant_ptr,
+    absmax_ptr,
+    num_paired_elements,
+    QUANT_BLOCK: tl.constexpr,
+):
+    mask = offsets < num_paired_elements
 
+    abs_offsets = offsets // QUANT_BLOCK
+    absmax = tl.load(absmax_ptr + abs_offsets, mask=mask, other=1.0, eviction_policy="evict_last")
+
+    # apply conversion
+    scaled_int8 = tl.load(quant_ptr + a, mask)
+    # apply scales
+    out_dq = scaled_int8 * absmax
+    return out_dq
+
+@triton.jit
+def quantize_8bit_blockwise_kernel_util(
+    A_ptr,
+    code_ptr,
+    absmax_ptr,
+    out_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+    CODE_SIZE: tl.constexpr,
+    SPLIT_NUM_BLOCKS: tl.constexpr,
+):
+    block_start_idx = tl.program_id(0) * SPLIT_NUM_BLOCKS
+    thread_idx = tl.arange(0, SPLIT_NUM_BLOCKS * BLOCK_SIZE)
+
+    offsets = block_start_idx * BLOCK_SIZE + thread_idx
+    mask = offsets < n_elements
+
+    A = tl.load(A_ptr + offsets, mask=mask, other=0.0)
+
+    # To be able process several blocks -> (BLOCK_SIZE, SPLIT_NUM_BLOCKS)
+    A_reshaped = tl.reshape(A, (SPLIT_NUM_BLOCKS, BLOCK_SIZE))
+
+    # Calculating absamax for each block
+    absmax = tl.max(tl.abs(A_reshaped), axis=1)
+    tl.store(absmax_ptr + block_start_idx + tl.arange(0, SPLIT_NUM_BLOCKS), absmax)
+
+    A_normalized = A_reshaped / absmax[:, None]
+    A_normalized = tl.clamp(A_normalized, -1.0, 1.0)
+
+    lower_pivot = tl.zeros((SPLIT_NUM_BLOCKS, BLOCK_SIZE), dtype=tl.int32)
+    upper_pivot = tl.full((SPLIT_NUM_BLOCKS, BLOCK_SIZE), CODE_SIZE - 1, dtype=tl.int32)
+
+    for _ in range(8):  # ceil(log2(code_size)) = 8, actually, in general case should be input parameter
+        pivot = (lower_pivot + upper_pivot) // 2
+        val = tl.load(code_ptr + pivot)
+        is_higher = A_normalized > val  # code[pivot]
+        lower_pivot = tl.where(is_higher, pivot, lower_pivot)
+        upper_pivot = tl.where(is_higher, upper_pivot, pivot)
+
+    # Choose closest level
+    lower_val = tl.load(code_ptr + lower_pivot)
+    upper_val = tl.load(code_ptr + upper_pivot)
+    lower_dist = tl.abs(A_normalized - lower_val)
+    upper_dist = tl.abs(A_normalized - upper_val)
+    quantized = tl.where(lower_dist <= upper_dist, lower_pivot, upper_pivot).to(tl.uint8)
+
+    # too slow approach
+    # diff = tl.abs(A_normalized[:, :, None] - code[None, None, :])
+    # quantized = tl.argmin(diff, axis=2).to(tl.uint8)
+
+    quantized_flat = tl.reshape(quantized, (BLOCK_SIZE * SPLIT_NUM_BLOCKS,))
+    tl.store(out_ptr + offsets, quantized_flat, mask=mask)
+
+@triton.jit
+def quantize_2d(x, quadrants_ptr, code_ptr, SIGNED: tl.constexpr):
+    # x: tl.scalar or tl.tensor
+    # quadrants: tl.tensor, shape [3]
+    # smem_code: tl.tensor, shape [256]
+    # Возвращает: индекс (uint32)
+
+    pivot = tl.zeros_like(x).to(tl.int32) + 127
+    upper_pivot = tl.zeros_like(x).to(tl.int32) + 255
+    lower_pivot = tl.zeros_like(x).to(tl.int32)
+    lower = tl.zeros_like(x) + (-1.0 if SIGNED else 0.0)
+    upper = tl.zeros_like(x) + 1.0
+    val = tl.zeros_like(x) + tl.load(quadrants_ptr + 1)
+    local_pivot = tl.zeros_like(x).to(tl.int32) + 1
+    offset = tl.zeros_like(x).to(tl.int32) + 1
+
+    i = 64
+    while i > 0:
+        is_higher = x > val
+        lower_pivot = tl.where(is_higher, pivot, lower_pivot)
+        upper_pivot = tl.where(is_higher, upper_pivot, pivot)
+        lower = tl.where(is_higher, val, lower)
+        upper = tl.where(is_higher, upper, val)
+        pivot = tl.where(is_higher, pivot + i, pivot - i)
+        local_pivot = tl.where(is_higher, local_pivot + offset, local_pivot - offset)
+        quadrants_val = tl.load(quadrants_ptr + lower_pivot)
+        code_val = tl.load(code_ptr + upper_pivot)
+        val = tl.where(i >= 64, quadrants_val, code_val)
+        offset = offset - 1
+        i = i // 2
+
+    is_higher = x > val
+    midpoint = tl.where(is_higher, (upper + val) * 0.5, (lower + val) * 0.5)
+    result = tl.where(is_higher, tl.where(x > midpoint, upper_pivot, pivot), tl.where(x < midpoint, lower_pivot, pivot))
+    return result.to(tl.uint32)
+
+# @triton.jit
+# def optimizer_static8bit2state_blockwise_kernel(
+#     p_ptr, g_ptr, state1_ptr, state2_ptr,
+#     beta1, beta2, beta3, alpha, eps, step, lr,
+#     quantiles1_ptr, quantiles2_ptr,
+#     absmax1_ptr, absmax2_ptr,
+#     weight_decay, gnorm_scale, skip_zeros,
+#     n,
+#     BLOCK_SIZE: tl.constexpr,
+#     N_PER_TH: tl.constexpr,
+# ):
+#     block_idx = tl.program_id(0)
+#     thread_idx = tl.arange(0, BLOCK_SIZE)
+#     base_idx = block_idx * BLOCK_SIZE
+
+#     # Индексы для этого блока
+#     idx = base_idx + thread_idx
+
+#     # Загрузка quantiles в локальные массивы (имитация shared memory)
+#     quantiles1 = tl.load(quantiles1_ptr + thread_idx, mask=thread_idx < 256, other=0.0)
+#     quantiles2 = tl.load(quantiles2_ptr + thread_idx, mask=thread_idx < 256, other=0.0)
+
+#     # Для каждого потока: обработка N_PER_TH элементов
+#     for j in range(N_PER_TH):
+#         i = idx + j * BLOCK_SIZE
+#         mask = i < n
+
+#         # Загрузка градиентов, состояний, параметров
+#         g_val = tl.load(g_ptr + i, mask=mask, other=0.0)
+#         p_val = tl.load(p_ptr + i, mask=mask, other=0.0)
+#         c1 = tl.load(state1_ptr + i, mask=mask, other=0)
+#         c2 = tl.load(state2_ptr + i, mask=mask, other=0)
+
+#         # Деквантование состояний
+#         # NOT sure abount block size
+#         c1_dq = dequant_8bit_kernel_util(c1, i, quantiles1_ptr, absmax1_ptr + (i // BLOCK_SIZE), n, BLOCK_SIZE)
+#         c2_dq = dequant_8bit_kernel_util(c2, i, quantiles2_ptr, absmax1_ptr + (i // BLOCK_SIZE), n, BLOCK_SIZE)
+#         s1 = c1_dq * tl.load(absmax1_ptr + (i // BLOCK_SIZE))
+#         s2 = c2_dq * tl.load(absmax2_ptr + (i // BLOCK_SIZE))
+
+#         # Обновление состояний
+#         g_val = g_val * gnorm_scale
+#         s2 = (s2 * beta2) + ((1.0 - beta2) * g_val * g_val)
+#         s1 = (s1 * beta1) + ((1.0 - beta1) * g_val)
+
+#         # Обновление параметров
+#         correction1 = 1.0 - tl.math.pow(beta1, step)
+#         correction2 = tl.math.sqrt(1.0 - tl.math.pow(beta2, step))
+#         step_size = -lr * correction2 / correction1
+#         p_val = p_val + (step_size * (s1 / (tl.math.sqrt(s2) + (correction2 * eps))))
+#         if weight_decay > 0.0:
+#             p_val = p_val * (1.0 - (lr * weight_decay))
+
+#         # Квантование состояний обратно
+#         # (Здесь предполагается, что quantize_2D реализован отдельно)
+#         # c1_new = quantize_2D(quadrants1, quantiles1, s1 / new_local_abs_max1)
+#         c1_new = quantize_2d(s1 / new_local_abs_max1, quadrants1, quantiles1)
+#         # c2_new = quantize_2D(quadrants2, quantiles2, s2 / new_local_abs_max2)
+#         # Для простоты: просто округляем к ближайшему индексу
+#         c1_new = tl.math.min(255, tl.math.max(0, tl.math.round(s1 / tl.load(absmax1_ptr + (i // BLOCK_SIZE)) * 255)))
+#         c2_new = tl.math.min(255, tl.math.max(0, tl.math.round(s2 / tl.load(absmax2_ptr + (i // BLOCK_SIZE)) * 255)))
+
+#         # Сохраняем результаты
+#         tl.store(p_ptr + i, p_val, mask=mask)
+#         tl.store(state1_ptr + i, c1_new.to(tl.uint8), mask=mask)
+#         tl.store(state2_ptr + i, c2_new.to(tl.uint8), mask=mask)
+
+@triton.jit
+def optimizer_static8bit2state_blockwise_kernel(
+    p_ptr, g_ptr, state1_ptr, state2_ptr,
+    beta1: tl.constexpr, 
+    beta2: tl.constexpr, 
+    beta3: tl.constexpr, 
+    alpha: tl.constexpr, 
+    eps: tl.constexpr, 
+    step: tl.constexpr, 
+    lr: tl.constexpr,
+    quantiles1_ptr, quantiles2_ptr,
+    absmax1_ptr, absmax2_ptr,
+    weight_decay, gnorm_scale, skip_zeros,
+    n,
+    BLOCK_SIZE: tl.constexpr,
+    N_PER_TH: tl.constexpr,
+    SIGNED: tl.constexpr = 1,
+):
+    pid = tl.program_id(0)
+    idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = idx < n
+    QUAD: tl.constexpr = 3
+
+    # Загрузка quantiles и quadrants в локальные переменные
+    smem_code1 = tl.load(quantiles1_ptr + tl.arange(0, 256))
+    smem_code2 = tl.load(quantiles2_ptr + tl.arange(0, 256))
+    quant1_wa = tl.arange(0, 4)
+    mask_wa = quant1_wa < QUAD
+    quadrants1 = tl.load(quantiles1_ptr + quant1_wa, mask=mask_wa, other=0.0)
+    quadrants2 = tl.load(quantiles2_ptr + quant1_wa, mask=mask_wa, other=0.0)
+
+    # Загрузка параметров, градиентов и состояний
+    p = tl.load(p_ptr + idx, mask=mask)
+    g = tl.load(g_ptr + idx, mask=mask)
+    c1 = tl.load(state1_ptr + idx, mask=mask).to(tl.uint8)
+    c2 = tl.load(state2_ptr + idx, mask=mask).to(tl.uint8)
+
+    absmax1 = tl.load(absmax1_ptr + (idx // BLOCK_SIZE))
+    absmax2 = tl.load(absmax2_ptr + (idx // BLOCK_SIZE))
+
+    # Деквантование состояний
+    c1_dq = dequant_8bit_kernel_util(c1, idx, quantiles1_ptr, absmax1_ptr + (idx // BLOCK_SIZE), n, BLOCK_SIZE)
+    c2_dq = dequant_8bit_kernel_util(c2, idx, quantiles2_ptr, absmax1_ptr + (idx // BLOCK_SIZE), n, BLOCK_SIZE)
+    s1 = c1_dq * absmax1
+    s2 = c2_dq * absmax2
+
+    # Обновление состояний
+    g_scaled = g * gnorm_scale
+    s2_new = s2 * beta2 + (1.0 - beta2) * g_scaled * g_scaled
+    s1_new = s1 * beta1 + (1.0 - beta1) * g_scaled
+
+    # Обновление параметров
+    correction1 = 1.0 - (beta1 ** step)
+    correction2 = tl.sqrt(1.0 - beta2 ** step)
+    step_size = -lr * correction2 / correction1
+    p_new = p + (step_size * (s1_new / (tl.sqrt(s2_new) + (correction2 * eps))))
+    if weight_decay > 0.0:
+        p_new = p_new * (1.0 - (lr * weight_decay))
+
+    # Квантование состояний обратно с помощью quantize_2d
+    s1_norm = s1_new / tl.max(tl.abs(s1_new), axis=0)
+    s2_norm = s2_new / tl.max(tl.abs(s2_new), axis=0)
+    c1_new = quantize_2d(s1_norm, quantiles1_ptr, quantiles1_ptr , SIGNED)
+    c2_new = quantize_2d(s2_norm, quantiles2_ptr, quantiles2_ptr, 0)
+
+    # Сохраняем результаты
+    tl.store(p_ptr + idx, p_new, mask=mask)
+    tl.store(state1_ptr + idx, c1_new, mask=mask)
+    tl.store(state2_ptr + idx, c2_new, mask=mask)
+
+def optim_kernel_call(
+        p: torch.Tensor,
+        g: torch.Tensor,
+        state1: torch.Tensor,
+        state2: torch.Tensor,
+        beta1: float,
+        beta2: float,
+        beta3: float,
+        alpha: float,
+        eps: float,
+        step: int,
+        lr: float,
+        qmap1: torch.Tensor,
+        qmap2: torch.Tensor,
+        absmax1: torch.Tensor,
+        absmax2: torch.Tensor,
+        weight_decay: float = 0.0,
+        gnorm_scale: float = 1.0,
+        skip_zeros=False,
+        n: int = 0,
+):
+    BLOCK_SIZE = 256
+    N_PER_TH = 1
+    grid = lambda META: (triton.cdiv(n, BLOCK_SIZE * N_PER_TH),)
+    print("Using Triton kernel")
+    optimizer_static8bit2state_blockwise_kernel[grid](
+        p, g, state1, state2,
+        beta1, beta2, beta3, alpha, eps, step, lr,
+        qmap1, qmap2,
+        absmax1, absmax2,
+        weight_decay, gnorm_scale, skip_zeros,
+        n,
+        BLOCK_SIZE, N_PER_TH
+    )

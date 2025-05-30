@@ -14,6 +14,7 @@ from torch import Tensor
 from typing_extensions import deprecated
 
 from bitsandbytes.utils import _reverse_4bit_compress_format, pack_dict_to_tensor, unpack_tensor_to_dict
+from bitsandbytes.backends.triton.ops import adam_8bit_blockwise_grad
 
 from .cextension import ipex_cpu, ipex_xpu, lib
 
@@ -84,9 +85,9 @@ str2optimizer8bit = {
 
 str2optimizer8bit_blockwise = {
     "adam": (
-        lib.cadam_8bit_blockwise_grad_fp32,
-        lib.cadam_8bit_blockwise_grad_fp16,
-        lib.cadam_8bit_blockwise_grad_bf16,
+        adam_8bit_blockwise_grad, # lib.cadam_8bit_blockwise_grad_fp32,
+        adam_8bit_blockwise_grad, # lib.cadam_8bit_blockwise_grad_fp16,
+        adam_8bit_blockwise_grad, # lib.cadam_8bit_blockwise_grad_bf16,
     ),
     "momentum": (
         lib.cmomentum_8bit_blockwise_grad_fp32,
@@ -1533,30 +1534,55 @@ def optimizer_update_8bit_blockwise(
             f"Gradient+optimizer bit data type combination not supported: grad {g.dtype}, optimizer {state1.dtype}",
         )
 
-    is_on_gpu([p, g, state1, state2, qmap1, qmap2, absmax1, absmax2])
-
-    with _cuda_device_of(g):
+    # is_on_gpu([p, g, state1, state2, qmap1, qmap2, absmax1, absmax2])
+    print("p device: ", p.device, " g device: ", g.device)
+    print("p device type: ", p.device, " g device type: ", g.device)
+    if p.device.type == "xpu":
+        print("calling without conversion")
         optim_func(
-            get_ptr(p),
-            get_ptr(g),
-            get_ptr(state1),
-            get_ptr(state2),
-            ct.c_float(beta1),
-            ct.c_float(beta2),
-            ct.c_float(beta3),
-            ct.c_float(alpha),
-            ct.c_float(eps),
-            ct.c_int32(step),
-            ct.c_float(lr),
-            get_ptr(qmap1),
-            get_ptr(qmap2),
-            get_ptr(absmax1),
-            get_ptr(absmax2),
-            ct.c_float(weight_decay),
-            ct.c_float(gnorm_scale),
-            ct.c_bool(skip_zeros),
-            ct.c_int32(g.numel()),
+            p,
+            g,
+            state1,
+            state2,
+            float(beta1),
+            float(beta2),
+            float(beta3),
+            float(alpha),
+            float(eps),
+            int(step),
+            float(lr),
+            qmap1,
+            qmap2,
+            absmax1,
+            absmax2,
+            float(weight_decay),
+            float(gnorm_scale),
+            bool(skip_zeros),
+            int(g.numel()),
         )
+    else:
+        with _cuda_device_of(g):
+            optim_func(
+                get_ptr(p),
+                get_ptr(g),
+                get_ptr(state1),
+                get_ptr(state2),
+                ct.c_float(beta1),
+                ct.c_float(beta2),
+                ct.c_float(beta3),
+                ct.c_float(alpha),
+                ct.c_float(eps),
+                ct.c_int32(step),
+                ct.c_float(lr),
+                get_ptr(qmap1),
+                get_ptr(qmap2),
+                get_ptr(absmax1),
+                get_ptr(absmax2),
+                ct.c_float(weight_decay),
+                ct.c_float(gnorm_scale),
+                ct.c_bool(skip_zeros),
+                ct.c_int32(g.numel()),
+            )
 
 
 @deprecated("This function is deprecated and will be removed in a future release.", category=FutureWarning)

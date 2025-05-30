@@ -1,5 +1,7 @@
 from collections.abc import Sequence
 
+from typing import Any, Optional, Union
+
 import torch
 
 from . import triton_kernels
@@ -273,4 +275,50 @@ def gemv_4bit(
         A,
         B_dq_triton,
         bias=None,
+    )
+
+
+def adam_8bit_blockwise_grad(
+        p: torch.Tensor,
+        g: torch.Tensor,
+        state1: torch.Tensor,
+        state2: Optional[torch.Tensor],
+        beta1: float,
+        beta2: float,
+        beta3: float,
+        alpha: float,
+        eps: float,
+        step: int,
+        lr: float,
+        qmap1: torch.Tensor,
+        qmap2: Optional[torch.Tensor],
+        absmax1: torch.Tensor,
+        absmax2: Optional[torch.Tensor],
+        weight_decay: float = 0.0,
+        gnorm_scale: float = 1.0,
+        skip_zeros=False,
+        n: int = 0,
+):
+    print("beta1: ", type(beta1), " beta2: ", type(beta2), " step: ", type(step))
+    print("beta1: ", beta1, " beta2: ", beta2, " step: ", step)
+    triton_kernels.optim_kernel_call(
+        p,
+        g,
+        state1,
+        state2,
+        beta1,
+        beta2,
+        beta3,
+        alpha,
+        eps,
+        step,
+        lr,
+        qmap1,
+        qmap2,
+        absmax1,
+        absmax2,
+        weight_decay=weight_decay,
+        gnorm_scale=gnorm_scale,
+        skip_zeros=skip_zeros,
+        n=n
     )
