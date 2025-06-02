@@ -6,8 +6,8 @@ import torch
 from ..._ops import register_kernel
 from ..utils import ipex_xpu, triton_available
 
-# With default torch, error:
-#  NotImplementedError: The operator 'aten::_int_mm' for XPU
+# _int_mm is available in torch starting from 2.7 version,
+# but currently it's don't have xpu implementation.
 if ipex_xpu and torch.__version__ >= (2, 7):
 
     @register_kernel("bitsandbytes::int8_linear_matmul", "xpu")
@@ -18,6 +18,7 @@ if ipex_xpu and torch.__version__ >= (2, 7):
         ).reshape(*A.shape[:-1], B.shape[0])
 
 
+# IPEX should be faster for xpu, so at first checking if it is available.
 if ipex_xpu:
 
     @register_kernel("bitsandbytes::dequantize_nf4_ipex", "xpu")
@@ -53,7 +54,6 @@ if ipex_xpu:
 
         return out.reshape(shape)
 elif triton_available:
-    # IPEX should be faster for xpu, so at first checking if it is available.
     from ..triton import ops as triton_ops
 
     register_kernel("bitsandbytes::quantize_blockwise", "xpu")(triton_ops.quantize_blockwise)
@@ -64,4 +64,4 @@ elif triton_available:
     register_kernel("bitsandbytes::dequantize_4bit", "xpu")(triton_ops.dequantize_4bit)
     register_kernel("bitsandbytes::gemv_4bit", "xpu")(triton_ops.gemv_4bit)
 else:
-    warnings.warn("XPU available, but nor ipex or trtion package is found.")
+    warnings.warn("XPU available but no ipex or triton packages found.")
