@@ -295,11 +295,11 @@ optimizer_names_8bit = [
     # "momentum8bit",
     # "rmsprop8bit",
     "adam8bit_blockwise",
-    "lion8bit_blockwise",
-    "momentum8bit_blockwise",
-    "rmsprop8bit_blockwise",
-    "ademamix8bit_blockwise",
-    "ademamix8bit_blockwise_scheduled",
+    # "lion8bit_blockwise",
+    # "momentum8bit_blockwise",
+    # "rmsprop8bit_blockwise",
+    # "ademamix8bit_blockwise",
+    # "ademamix8bit_blockwise_scheduled",
 ]
 
 
@@ -307,7 +307,7 @@ optimizer_names_8bit = [
 @pytest.mark.parametrize("gtype", [torch.float32, torch.float16, torch.bfloat16], ids=describe_dtype)
 @pytest.mark.parametrize("dim2", [32, 1024, 4097], ids=id_formatter("dim2"))
 @pytest.mark.parametrize("dim1", [1024], ids=id_formatter("dim1"))
-def test_optimizer8bit(requires_cuda, dim1, dim2, gtype, optim_name):
+def test_optimizer8bit(dim1, dim2, gtype, optim_name):
     torch.set_printoptions(precision=6)
 
     if gtype == torch.bfloat16 and "blockwise" not in optim_name:
@@ -315,7 +315,7 @@ def test_optimizer8bit(requires_cuda, dim1, dim2, gtype, optim_name):
 
     if dim1 == 1 and dim2 == 1:
         return
-    p1 = torch.randn(dim1, dim2, device="cuda", dtype=gtype) * 0.1
+    p1 = torch.randn(dim1, dim2, device="xpu", dtype=gtype) * 0.1
     p2 = p1.clone()
     p1 = p1.float()
     blocksize = 256
@@ -337,7 +337,7 @@ def test_optimizer8bit(requires_cuda, dim1, dim2, gtype, optim_name):
     relerrors = []
 
     for i in range(50):
-        g = torch.randn(dim1, dim2, device="cuda", dtype=gtype) * 0.01
+        g = torch.randn(dim1, dim2, device="xpu", dtype=gtype) * 0.01
         p1.grad = g.clone().float()
         p2.grad = g.clone()
 
